@@ -1,4 +1,4 @@
-import { test, describe, expect } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { CachedMap, LRU } from '../../src/cached.js';
 
 function wait(t: number) {
@@ -113,7 +113,7 @@ describe('CachedMap', () => {
       c.get('A', async () => {
         throw 'wtf';
       })
-    ).resolves.toBe(1);
+    ).resolves.toBe(1 as never);
   });
 
   test('cached map', async () => {
@@ -125,7 +125,7 @@ describe('CachedMap', () => {
       c.get('A', async () => {
         throw 'wtf';
       })
-    ).resolves.toBe(1);
+    ).resolves.toBe(1 as never);
     expect(c.pendingSize).toBe(1);
     expect(c.cachedSize).toBe(1);
     expect(c.cachedRemainingMs('A')).toBeGreaterThan(90);

@@ -1,7 +1,15 @@
-import type { ChainPair, HexString, Provider, ProviderPair } from './types.js';
+import type { BlockTag, Client, TransportConfig } from 'viem';
+
+import type { ChainPair, ClientPair, HexString } from './types.js';
 import type { AbstractProver, ProofSequence, ProofSequenceV1 } from './vm.js';
 
-export type RollupDeployment<Config> = Readonly<ChainPair & Config>;
+export type RollupDeployment<Config> = Readonly<
+  ChainPair &
+    Config & {
+      transportConfig1?: Partial<TransportConfig>;
+      transportConfig2?: Partial<TransportConfig>;
+    }
+>;
 
 export type RollupCommit<P extends AbstractProver> = {
   readonly index: bigint;
@@ -14,31 +22,33 @@ export type RollupCommitType<R extends Rollup> = Parameters<
   R['fetchParentCommitIndex']
 >[0];
 
-export abstract class AbstractRollup<C extends RollupCommit<AbstractProver>> {
+export abstract class AbstractRollup<
+  commit extends RollupCommit<AbstractProver>,
+  client2 extends Client = Client,
+  client1 extends Client = Client,
+> {
   // allows configuration of commit and prover
   // "expand LRU cache" => prover.proofLRU.maxCached = 1_000_000
   // "disable fast cache" => prover.fastCache = undefined
   // "keep fast cache around longer" => prover.fastCache?.cacheMs = Infinity
   // "limit targets" => prover.maxUniqueTargets = 1
-  configure: (<T extends C>(commit: T) => void) | undefined;
-  latestBlockTag = 'finalized';
+  configure: (<T extends commit>(commit: T) => void) | undefined;
+  latestBlockTag: BlockTag = 'finalized';
   getLogsStepSize = 1000n;
-  readonly provider1: Provider;
-  readonly provider2: Provider;
-  constructor(providers: ProviderPair) {
-    this.provider1 = providers.provider1;
-    this.provider2 = providers.provider2;
+  readonly client1: client1;
+  readonly client2: client2;
+  constructor({ client1, client2 }: ClientPair<client2, client1>) {
+    this.client1 = client1;
+    this.client2 = client2;
   }
-
-  // abstract interface
   abstract fetchLatestCommitIndex(): Promise<bigint>;
-  protected abstract _fetchParentCommitIndex(commit: C): Promise<bigint>;
-  protected abstract _fetchCommit(index: bigint): Promise<C>;
-  abstract encodeWitness(commit: C, proofSeq: ProofSequence): HexString;
+  protected abstract _fetchParentCommitIndex(commit: commit): Promise<bigint>;
+  protected abstract _fetchCommit(index: bigint): Promise<commit>;
+  abstract encodeWitness(commit: commit, proofSeq: ProofSequence): HexString;
   abstract windowFromSec(sec: number): number;
 
   // abstract wrappers
-  async fetchParentCommitIndex(commit: C) {
+  async fetchParentCommitIndex(commit: commit) {
     try {
       if (!commit.index) throw undefined;
       const index = await this._fetchParentCommitIndex(commit);
@@ -63,10 +73,10 @@ export abstract class AbstractRollup<C extends RollupCommit<AbstractProver>> {
   async fetchLatestCommit() {
     return this.fetchCommit(await this.fetchLatestCommitIndex());
   }
-  async fetchParentCommit(commit: C) {
+  async fetchParentCommit(commit: commit) {
     return this.fetchCommit(await this.fetchParentCommitIndex(commit));
   }
-  async fetchRecentCommits(count: number): Promise<C[]> {
+  async fetchRecentCommits(count: number): Promise<commit[]> {
     if (count < 1) return [];
     let commit = await this.fetchLatestCommit();
     const v = [commit];
@@ -82,7 +92,10 @@ export abstract class AbstractRollup<C extends RollupCommit<AbstractProver>> {
 }
 
 export abstract class AbstractRollupV1<
-  C extends RollupCommit<AbstractProver>,
-> extends AbstractRollup<C> {
-  abstract encodeWitnessV1(commit: C, proofSeq: ProofSequenceV1): HexString;
+  commit extends RollupCommit<AbstractProver>,
+> extends AbstractRollup<commit> {
+  abstract encodeWitnessV1(
+    commit: commit,
+    proofSeq: ProofSequenceV1
+  ): HexString;
 }

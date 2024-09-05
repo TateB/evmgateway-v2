@@ -49,8 +49,10 @@
     "prettier": "^3.3.3"
   },
   "dependencies": {
+    "@ensdomains/ccip-read-router": "^0.0.5",
     "@resolverworks/ezccip": "^0.0.14",
-    "ethers": "^6.13.1"
+    "ethers": "^6.13.1",
+    "viem": "^2.21.2"
   },
   "peerDependencies": {
     "typescript": "^5.5.2"

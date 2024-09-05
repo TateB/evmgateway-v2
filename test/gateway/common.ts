@@ -1,43 +1,38 @@
-import type { HexAddress } from '../../src/types.js';
-import type { RollupDeployment } from '../../src/rollup.js';
-import { Gateway } from '../../src/gateway.js';
-import { createProviderPair, providerURL, chainName } from '../providers.js';
-import { serve } from '@resolverworks/ezccip';
-import { Foundry } from '@adraffy/blocksmith';
-import { describe, afterAll } from 'bun:test';
-import { runSlotDataTests } from './tests.js';
-import { type OPConfig, OPRollup } from '../../src/op/OPRollup.js';
+import { describe } from 'bun:test';
 import {
   type OPFaultConfig,
   OPFaultRollup,
 } from '../../src/op/OPFaultRollup.js';
+import { type OPConfig, OPRollup } from '../../src/op/OPRollup.js';
+import type { RollupDeployment } from '../../src/rollup.js';
+import type { HexAddress } from '../../src/types.js';
+import { chainName } from '../providers.js';
+import { setup } from '../setup.js';
 
 export function testOP(
   config: RollupDeployment<OPConfig>,
   slotDataReaderAddress: HexAddress
 ) {
-  describe(chainName(config.chain2), async () => {
-    const rollup = new OPRollup(createProviderPair(config), config);
-    const foundry = await Foundry.launch({
-      fork: providerURL(config.chain1),
-      infoLog: false,
+  describe(chainName(config.chain2), () => {
+    setup({
+      Rollup: OPRollup,
+      config,
+      deployReader: async ({ foundry, endpoint, rollup }) => {
+        const verifier = await foundry.deploy({
+          file: 'OPVerifier',
+          args: [
+            [endpoint],
+            rollup.defaultWindow,
+            rollup.l2OutputOracle.address,
+          ],
+        });
+        const reader = await foundry.deploy({
+          file: 'SlotDataReader',
+          args: [verifier, slotDataReaderAddress],
+        });
+        return reader;
+      },
     });
-    afterAll(() => foundry.shutdown());
-    const gateway = new Gateway(rollup);
-    const ccip = await serve(gateway, {
-      protocol: 'raw',
-      log: false,
-    });
-    afterAll(() => ccip.http.close());
-    const verifier = await foundry.deploy({
-      file: 'OPVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, rollup.L2OutputOracle],
-    });
-    const reader = await foundry.deploy({
-      file: 'SlotDataReader',
-      args: [verifier, slotDataReaderAddress],
-    });
-    runSlotDataTests(reader);
   });
 }
 
@@ -46,40 +41,31 @@ export function testOPFault(
   slotDataReaderAddress: HexAddress
 ) {
   describe(chainName(config.chain2), async () => {
-    const rollup = await OPFaultRollup.create(
-      createProviderPair(config),
-      config
-    );
-    const foundry = await Foundry.launch({
-      fork: providerURL(config.chain1),
-      infoLog: false,
+    setup({
+      Rollup: OPFaultRollup,
+      config,
+      deployReader: async ({ foundry, endpoint, gateway, rollup }) => {
+        const commit = await gateway.getLatestCommit();
+        const gameFinder = await foundry.deploy({
+          file: 'FixedOPFaultGameFinder',
+          args: [commit.index],
+        });
+        const verifier = await foundry.deploy({
+          file: 'OPFaultVerifier',
+          args: [
+            [endpoint],
+            rollup.defaultWindow,
+            rollup.optimismPortal.address,
+            gameFinder, // official is too slow in fork mode (30sec+)
+            rollup.gameTypeBitMask,
+          ],
+        });
+        const reader = await foundry.deploy({
+          file: 'SlotDataReader',
+          args: [verifier, slotDataReaderAddress],
+        });
+        return reader;
+      },
     });
-    afterAll(() => foundry.shutdown());
-    const gateway = new Gateway(rollup);
-    const ccip = await serve(gateway, {
-      protocol: 'raw',
-      log: false,
-    });
-    afterAll(() => ccip.http.close());
-    const commit = await gateway.getLatestCommit();
-    const gameFinder = await foundry.deploy({
-      file: 'FixedOPFaultGameFinder',
-      args: [commit.index],
-    });
-    const verifier = await foundry.deploy({
-      file: 'OPFaultVerifier',
-      args: [
-        [ccip.endpoint],
-        rollup.defaultWindow,
-        rollup.OptimismPortal,
-        gameFinder, // official is too slow in fork mode (30sec+)
-        rollup.gameTypeBitMask,
-      ],
-    });
-    const reader = await foundry.deploy({
-      file: 'SlotDataReader',
-      args: [verifier, slotDataReaderAddress],
-    });
-    runSlotDataTests(reader);
   });
 }

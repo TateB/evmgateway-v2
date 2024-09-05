@@ -1,14 +1,18 @@
-import type { EncodedProof, HexString, Provider } from '../types.js';
-import { AbstractProver, makeStorageKey, type Need } from '../vm.js';
-import { ZeroHash, dataSlice, toBeHex } from 'ethers';
 import {
-  ABI_CODER,
-  NULL_CODE_HASH,
-  sendImmediate,
-  withResolvers,
-} from '../utils.js';
+  encodeAbiParameters,
+  parseAbiParameters,
+  sliceHex,
+  toHex,
+  zeroHash,
+} from 'viem';
+import { getCode, getStorageAt } from 'viem/actions';
+
+import type { EncodedProof, HexString } from '../types.js';
+import { NULL_CODE_HASH, withResolvers } from '../utils.js';
+import { AbstractProver, makeStorageKey, type Need } from '../vm.js';
 import {
   isExistanceProof,
+  type LineaClient,
   type LineaProof,
   type RPCLineaGetProof,
 } from './types.js';
@@ -19,24 +23,30 @@ function isContract(accountProof: LineaProof) {
   return (
     isExistanceProof(accountProof) &&
     // https://github.com/Consensys/linea-monorepo/blob/a001342170768a22988a29b2dca8601199c6e205/contracts/contracts/lib/SparseMerkleProof.sol#L23
-    dataSlice(accountProof.proof.value, 128, 160) !== NULL_CODE_HASH
+    sliceHex(accountProof.proof.value, 128, 160) !== NULL_CODE_HASH
   );
 }
 
 function encodeProof(proof: LineaProof) {
-  return ABI_CODER.encode(
-    ['tuple(uint256, bytes, bytes[])[]'],
+  return encodeAbiParameters(
+    parseAbiParameters('(uint256, bytes, bytes[])[]'),
     [
       isExistanceProof(proof)
-        ? [[proof.leafIndex, proof.proof.value, proof.proof.proofRelatedNodes]]
+        ? [
+            [
+              BigInt(proof.leafIndex),
+              proof.proof.value,
+              proof.proof.proofRelatedNodes,
+            ],
+          ]
         : [
             [
-              proof.leftLeafIndex,
+              BigInt(proof.leftLeafIndex),
               proof.leftProof.value,
               proof.leftProof.proofRelatedNodes,
             ],
             [
-              proof.rightLeafIndex,
+              BigInt(proof.rightLeafIndex),
               proof.rightProof.value,
               proof.rightProof.proofRelatedNodes,
             ],
@@ -47,8 +57,8 @@ function encodeProof(proof: LineaProof) {
 
 export class LineaProver extends AbstractProver {
   constructor(
-    readonly provider: Provider,
-    readonly block: HexString
+    readonly client: LineaClient,
+    readonly blockNumber: bigint
   ) {
     super();
   }
@@ -56,12 +66,12 @@ export class LineaProver extends AbstractProver {
     target: HexString,
     slot: bigint
   ): Promise<HexString> {
-    target = target.toLowerCase();
+    target = target.toLowerCase() as HexString;
     // check to see if we know this target isn't a contract
     const accountProof: LineaProof | undefined =
       await this.proofLRU.touch(target);
     if (accountProof && !isContract(accountProof)) {
-      return ZeroHash;
+      return zeroHash;
     }
     // check to see if we've already have a proof for this value
     const storageKey = makeStorageKey(target, slot);
@@ -70,30 +80,39 @@ export class LineaProver extends AbstractProver {
     if (storageProof) {
       return isExistanceProof(storageProof)
         ? storageProof.proof.value
-        : ZeroHash;
+        : zeroHash;
     }
     // we didn't have the proof
     if (this.fastCache) {
-      return this.fastCache.get(storageKey, () =>
-        this.provider.getStorage(target, slot, this.block)
+      return this.fastCache.get(
+        storageKey,
+        () =>
+          getStorageAt(this.client, {
+            address: target,
+            slot: toHex(slot),
+            blockNumber: this.blockNumber,
+          }) as Promise<HexString>
       );
     }
+
     const proof = await this.getProofs(target, [slot]);
     return isContract(proof.accountProof) &&
       isExistanceProof(proof.storageProofs[0])
       ? proof.storageProofs[0].proof.value
-      : ZeroHash;
+      : zeroHash;
   }
   override async isContract(target: HexString) {
     if (this.fastCache) {
       return this.fastCache.get(target, async () => {
-        const code = await this.provider.getCode(target, this.block);
-        return code.length > 2;
+        const code = await getCode(this.client, {
+          address: target,
+          blockNumber: this.blockNumber,
+        });
+        return !!code && code.length > 2;
       });
-    } else {
-      const { accountProof } = await this.getProofs(target);
-      return isContract(accountProof);
     }
+    const { accountProof } = await this.getProofs(target);
+    return isContract(accountProof);
   }
   override async prove(needs: Need[]) {
     // reduce an ordered list of needs into a deduplicated list of proofs
@@ -164,7 +183,7 @@ export class LineaProver extends AbstractProver {
     target: HexString,
     slots: bigint[] = []
   ): Promise<RPCLineaGetProof> {
-    target = target.toLowerCase();
+    target = target.toLowerCase() as HexString;
     // there are (3) cases:
     // 1.) account doesn't exist
     // 2.) account is EOA
@@ -225,19 +244,22 @@ export class LineaProver extends AbstractProver {
     };
   }
   async fetchProofs(target: HexString, slots: bigint[] = []) {
-    const ps = [];
+    const ps: Promise<RPCLineaGetProof>[] = [];
     for (let i = 0; ; ) {
       ps.push(
         // 20240825: most cloud providers seem to reject batched getProof
         // since we aren't in control of provider construction (ie. batchMaxSize)
         // sendImmediate is a temporary hack to avoid this issue
-        sendImmediate<RPCLineaGetProof>(this.provider, 'linea_getProof', [
-          target,
-          slots
-            .slice(i, (i += this.proofBatchSize))
-            .map((slot) => toBeHex(slot, 32)),
-          this.block,
-        ])
+        this.client.request({
+          method: 'linea_getProof',
+          params: [
+            target,
+            slots
+              .slice(i, (i += this.proofBatchSize))
+              .map((slot) => toHex(slot, { size: 32 })),
+            toHex(this.blockNumber),
+          ],
+        })
       );
       if (i >= slots.length) break;
     }

@@ -1,8 +1,9 @@
-import { DataRequest, MAX_STACK } from '../../src/vm.js';
-import { Foundry } from '@adraffy/blocksmith';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { ethers } from 'ethers';
-import { afterAll, test, expect, describe } from 'bun:test';
 import { EthProver } from '../../src/eth/EthProver.js';
+import type { HexAddress } from '../../src/types.js';
+import { DataRequest, MAX_STACK } from '../../src/vm.js';
+import { Foundry } from '../foundry.js';
 
 describe('limits', async () => {
   const foundry = await Foundry.launch({ infoLog: false });
@@ -14,7 +15,7 @@ describe('limits', async () => {
       }
     `,
   });
-  const prover = await EthProver.latest(foundry.provider);
+  const prover = await EthProver.latest(foundry.client);
   async function exec(r: DataRequest) {
     const state = await prover.evalRequest(r);
     return prover.prove(state.needs);
@@ -34,7 +35,7 @@ describe('limits', async () => {
   test('max targets', async () => {
     const req = new DataRequest();
     for (let i = 0; i < prover.maxUniqueTargets; i++) {
-      req.setTarget(ethers.toBeHex(i, 20));
+      req.setTarget(ethers.toBeHex(i, 20) as HexAddress);
     }
     expect(exec(req)).resolves.toBeDefined();
     req.setTarget('0x51050ec063d393217B436747617aD1C2285Aeeee'); // one more

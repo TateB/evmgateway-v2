@@ -1,32 +1,57 @@
+import { type AbiParametersToPrimitiveTypes, type ParseAbiItem } from 'abitype';
+import {
+  encodeAbiParameters,
+  encodePacked,
+  keccak256,
+  toHex,
+  type AbiFunction,
+  type Address,
+  type Hex,
+} from 'viem';
+
+import { CachedMap, CachedValue, LRU } from './cached.js';
 import {
   AbstractRollupV1,
-  type RollupCommitType,
   type Rollup,
+  type RollupCommitType,
 } from './rollup.js';
-import type { HexString } from './types.js';
-import {
-  Interface,
-  solidityPackedKeccak256,
-  getBytes,
-  hexlify,
-  id as keccakStr,
-} from 'ethers';
-import { CachedMap, CachedValue, LRU } from './cached.js';
-import { ABI_CODER } from './utils.js';
 import { DataRequestV1 } from './v1.js';
-import { EZCCIP } from '@resolverworks/ezccip';
 
-export const GATEWAY_ABI = new Interface([
-  `function proveRequest(bytes context, tuple(bytes ops, bytes[] inputs)) returns (bytes)`,
-  `function getStorageSlots(address target, bytes32[] commands, bytes[] constants) returns (bytes)`,
-]);
+type ParseAbiFunction<signature extends string> =
+  ParseAbiItem<signature> extends AbiFunction ? ParseAbiItem<signature> : never;
 
-// shorten the request hash for less spam and easier comparision
-function shortHash(x: string): string {
-  return x.slice(-8);
-}
+type AddAbiHandlerParameters<signature extends string> = {
+  type: signature;
+  handle: AbiFunctionHandler<ParseAbiFunction<signature>>;
+};
 
-export class Gateway<R extends Rollup> extends EZCCIP {
+type RpcRequest = {
+  to: Address;
+  data: Hex;
+};
+export type AbiFunctionHandler<
+  abiFunc extends AbiFunction,
+  returnType extends AbiParametersToPrimitiveTypes<abiFunc['outputs']> | Hex =
+    | AbiParametersToPrimitiveTypes<abiFunc['outputs']>
+    | Hex,
+> = (
+  args: AbiParametersToPrimitiveTypes<abiFunc['inputs']>,
+  req: RpcRequest
+) => Promise<returnType> | returnType;
+export type GenericRouter = {
+  add: <signature extends string>(
+    params: AddAbiHandlerParameters<signature>
+  ) => void;
+};
+
+const proveRequestAbiSnippet =
+  'function proveRequest(bytes context, (bytes ops, bytes[] inputs)) returns (bytes)' as const;
+const getStorageSlotsAbiSnippet =
+  'function getStorageSlots(address target, bytes32[] commands, bytes[] constants) returns (bytes)' as const;
+
+export const GATEWAY_ABI = [proveRequestAbiSnippet, getStorageSlotsAbiSnippet];
+
+export class Gateway<R extends Rollup> {
   // the max number of non-latest commitments to keep in memory
   commitDepth = 2;
   // if true, requests beyond the commit depth are still supported
@@ -38,52 +63,55 @@ export class Gateway<R extends Rollup> extends EZCCIP {
     Infinity
   );
   private readonly parentCacheMap = new CachedMap<bigint, bigint>(Infinity);
-  readonly callLRU = new LRU<string, Uint8Array>(1000);
-  constructor(readonly rollup: R) {
-    super();
-    this.register(GATEWAY_ABI, {
-      proveRequest: async ([ctx, { ops, inputs }], _context, history) => {
+  readonly callLRU = new LRU<string, Hex>(1000);
+  constructor(readonly rollup: R) {}
+
+  register<router extends GenericRouter>(router: router) {
+    router.add({
+      type: proveRequestAbiSnippet,
+      handle: async ([ctx, { ops, inputs }]) => {
         // given the requested commitment, we answer: min(requested, latest)
         const commit = await this.getRecentCommit(BigInt(ctx.slice(0, 66)));
         // we cannot hash the context.calldata directly because the requested
         // commit might be different, so we hash using the determined commit
-        const hash = solidityPackedKeccak256(
-          ['uint256', 'bytes', 'bytes[]'],
-          [commit.index, ops, inputs]
+        const hash = keccak256(
+          encodePacked(
+            ['uint256', 'bytes', 'bytes[]'],
+            [commit.index, ops, inputs]
+          )
         );
-        // TODO: ops could be hashed like a selector...
-        history.show = [commit.index, hexlify(ops), shortHash(hash)];
         // NOTE: for a given commit + request, calls are pure
         return this.callLRU.cache(hash, async () => {
           const state = await commit.prover.evalDecoded(ops, inputs);
           const proofSeq = await commit.prover.prove(state.needs);
-          return getBytes(this.rollup.encodeWitness(commit, proofSeq));
+          return this.rollup.encodeWitness(commit, proofSeq);
         });
       },
     });
-    // NOTE: this only works if V1 and V2 share same proof encoding!
+
+    const rollup = this.rollup;
     if (rollup instanceof AbstractRollupV1) {
-      const rollupV1 = rollup; // 20240815: tsc bug https://github.com/microsoft/TypeScript/issues/30625
-      this.register(GATEWAY_ABI, {
-        getStorageSlots: async (
-          [target, commands, constants],
-          context,
-          history
-        ) => {
+      router.add({
+        type: getStorageSlotsAbiSnippet,
+        handle: async ([target, commands, constants], context) => {
           const commit = await this.getLatestCommit();
-          const hash = keccakStr(`${commit.index}:${context.calldata}`);
-          history.show = [commit.index, shortHash(hash)];
+          const hash = keccak256(toHex(`${commit.index}:${context.data}`));
           return this.callLRU.cache(hash, async () => {
-            const req = new DataRequestV1(target, commands, constants).v2(); // upgrade v1 to v2
+            const req = new DataRequestV1(
+              target,
+              [...commands],
+              [...constants]
+            ).v2(); // upgrade v1 to v2
             const state = await commit.prover.evalRequest(req);
             const proofSeq = await commit.prover.proveV1(state.needs);
-            const witness = rollupV1.encodeWitnessV1(commit, proofSeq);
-            return getBytes(ABI_CODER.encode(['bytes'], [witness]));
+            const witness = rollup.encodeWitnessV1(commit, proofSeq);
+            return encodeAbiParameters([{ type: 'bytes' }], [witness]);
           });
         },
       });
     }
   }
+
   async getLatestCommit() {
     // check if the commit changed
     const prev = await this.latestCache.value;
@@ -131,30 +159,29 @@ export class Gateway<R extends Rollup> extends EZCCIP {
 }
 
 // assumption: serves latest finalized commit
-export abstract class GatewayV1<R extends Rollup> extends EZCCIP {
+export abstract class GatewayV1<R extends Rollup> {
   private latestCommit: RollupCommitType<R> | undefined;
   private readonly latestCache = new CachedValue(() =>
     this.rollup.fetchLatestCommitIndex()
   );
-  readonly callLRU = new LRU<string, Uint8Array>();
-  constructor(readonly rollup: R) {
-    super();
-    this.register(GATEWAY_ABI, {
-      getStorageSlots: async (
-        [target, commands, constants],
-        context,
-        history
-      ) => {
+  readonly callLRU = new LRU<string, Hex>();
+
+  constructor(readonly rollup: R) {}
+
+  register<router extends GenericRouter>(router: router) {
+    router.add({
+      type: getStorageSlotsAbiSnippet,
+      handle: async ([target, commands, constants], context) => {
         const commit = await this.getLatestCommit();
-        const hash = keccakStr(`${commit.index}:${context.calldata}`);
-        history.show = [commit.index, shortHash(hash)];
+        const hash = keccak256(toHex(`${commit.index}:${context.data}`));
         return this.callLRU.cache(hash, async () => {
-          const req = new DataRequestV1(target, commands, constants);
-          return getBytes(await this.handleRequest(commit, req));
+          const req = new DataRequestV1(target, [...commands], [...constants]);
+          return await this.handleRequest(commit, req);
         });
       },
     });
   }
+
   async getLatestCommit() {
     const index = await this.latestCache.get();
     if (!this.latestCommit || index != this.latestCommit.index) {
@@ -167,5 +194,5 @@ export abstract class GatewayV1<R extends Rollup> extends EZCCIP {
   abstract handleRequest(
     commit: RollupCommitType<R>,
     request: DataRequestV1
-  ): Promise<HexString>;
+  ): Promise<Hex>;
 }

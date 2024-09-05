@@ -1,15 +1,16 @@
-import type { BigNumberish } from '../../src/types.js';
-import { EVMProgram, DataRequest, solidityFollowSlot } from '../../src/vm.js';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { ethers, type BigNumberish } from 'ethers';
+import { toHex, zeroAddress } from 'viem';
 import { EthProver } from '../../src/eth/EthProver.js';
-import { Foundry } from '@adraffy/blocksmith';
-import { ethers } from 'ethers';
-import { test, afterAll, expect, describe } from 'bun:test';
+import type { HexAddress, HexString } from '../../src/types.js';
+import { DataRequest, EVMProgram, solidityFollowSlot } from '../../src/vm.js';
+import { Foundry } from '../foundry.js';
 
 function hexStr(s: string) {
   return ethers.hexlify(ethers.toUtf8Bytes(s));
 }
 function uint256(x: BigNumberish) {
-  return ethers.toBeHex(x, 32);
+  return ethers.toBeHex(x, 32) as HexString;
 }
 
 describe('ops', async () => {
@@ -31,7 +32,7 @@ describe('ops', async () => {
   });
 
   async function verify(req: DataRequest) {
-    const prover = await EthProver.latest(foundry.provider);
+    const prover = await EthProver.latest(foundry.client);
     const stateRoot = await prover.fetchStateRoot();
     const vm = await prover.evalRequest(req);
     const { proofs, order } = await prover.prove(vm.needs);
@@ -72,8 +73,8 @@ describe('ops', async () => {
     req.pushStr('').keccak().addOutput();
     req.pushStr('chonk').keccak().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(ethers.id(''));
-    expect(values[1]).toBe(ethers.id('chonk'));
+    expect(values[0]).toBe(ethers.id('') as HexString);
+    expect(values[1]).toBe(ethers.id('chonk') as HexString);
   });
 
   test('slice', async () => {
@@ -81,11 +82,13 @@ describe('ops', async () => {
     const big = Uint8Array.from({ length: 500 }, (_, i) => i);
     const req = new DataRequest();
     req.pushBytes(small).slice(4, 3).addOutput();
-    req.pushBytes(big).slice(300, 5).addOutput();
+    req.pushBytes(toHex(big)).slice(300, 5).addOutput();
     req.pushBytes('0x').slice(0, 0).addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(ethers.dataSlice(small, 4, 4 + 3));
-    expect(values[1]).toBe(ethers.hexlify(big.slice(300, 300 + 5)));
+    expect(values[0]).toBe(ethers.dataSlice(small, 4, 4 + 3) as HexString);
+    expect(values[1]).toBe(
+      ethers.hexlify(big.slice(300, 300 + 5)) as HexString
+    );
     expect(values[2]).toBe('0x');
   });
 
@@ -99,14 +102,16 @@ describe('ops', async () => {
     const req = new DataRequest();
     req.push(1).push(2).concat().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(ethers.concat([uint256(1), uint256(2)]));
+    expect(values[0]).toBe(
+      ethers.concat([uint256(1), uint256(2)]) as HexString
+    );
   });
 
   test('concat string x2', async () => {
     const req = new DataRequest();
     req.pushStr('r').pushStr('af').pushStr('fy').concat().concat().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(hexStr('raffy'));
+    expect(values[0]).toBe(hexStr('raffy') as HexString);
   });
 
   test('concat nothing', async () => {
@@ -170,7 +175,7 @@ describe('ops', async () => {
     const req = new DataRequest();
     req.setTarget(contract.target).pushTarget().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(contract.target.toLowerCase());
+    expect(values[0]).toBe(contract.target.toLowerCase() as HexAddress);
   });
 
   test('pushOutput', async () => {
@@ -184,7 +189,11 @@ describe('ops', async () => {
     const req = new DataRequest();
     req.setSlot(1337).pushStr('raffy').follow().pushSlot().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(uint256(solidityFollowSlot(1337, hexStr('raffy'))));
+    expect(values[0]).toBe(
+      uint256(
+        solidityFollowSlot(1337, hexStr('raffy') as HexString)
+      ) as HexString
+    );
   });
 
   test('read', async () => {
@@ -220,21 +229,23 @@ describe('ops', async () => {
     const req = new DataRequest();
     req.setTarget(contract.target).setSlot(0).read(2).addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(ethers.concat([uint256(1), uint256(2)]));
+    expect(values[0]).toBe(
+      ethers.concat([uint256(1), uint256(2)]) as HexString
+    );
   });
 
   test('readBytes small', async () => {
     const req = new DataRequest();
     req.setTarget(contract.target).setSlot(2).readBytes().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(hexStr('abc'));
+    expect(values[0]).toBe(hexStr('abc') as HexString);
   });
 
   test('readBytes big', async () => {
     const req = new DataRequest();
     req.setTarget(contract.target).setSlot(3).readBytes().addOutput();
     const { values } = await verify(req);
-    expect(values[0]).toBe(hexStr('abc'.repeat(20)));
+    expect(values[0]).toBe(hexStr('abc'.repeat(20)) as HexString);
   });
 
   test('readArray', async () => {
@@ -275,7 +286,7 @@ describe('ops', async () => {
 
   test('requireContract on null', async () => {
     const req = new DataRequest();
-    req.setTarget(ethers.ZeroAddress).requireContract();
+    req.setTarget(zeroAddress).requireContract();
     const { exitCode } = await verify(req);
     expect(exitCode).toBe(1);
   });
@@ -289,7 +300,7 @@ describe('ops', async () => {
     req.begin().target().requireContract().end();
     req.evalLoop({ success: true, acquire: true });
     const { target, stack } = await verify(req);
-    expect(target).toBe(contract.target.toLowerCase());
+    expect(target).toBe(contract.target.toLowerCase() as HexAddress);
     expect(stack).toHaveLength(0);
   });
 

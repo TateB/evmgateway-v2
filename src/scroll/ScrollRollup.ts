@@ -1,27 +1,34 @@
 import {
+  concatHex,
+  encodeAbiParameters,
+  parseAbiParameters,
+  toHex,
+} from 'viem';
+import { getTransactionReceipt, readContract } from 'viem/actions';
+import { mainnet, scroll, scrollSepolia, sepolia } from 'viem/chains';
+
+import { EthProver } from '../eth/EthProver.js';
+import {
   AbstractRollupV1,
   type RollupCommit,
   type RollupDeployment,
 } from '../rollup.js';
 import type {
+  ClientPair,
   HexAddress,
   HexString,
   HexString32,
-  ProviderPair,
 } from '../types.js';
 import type { ProofSequence, ProofSequenceV1 } from '../vm.js';
-import { Contract, concat, toBeHex } from 'ethers';
-import { CHAINS } from '../chains.js';
-import { EthProver } from '../eth/EthProver.js';
-import { POSEIDON_ABI, ROLLUP_ABI, VERIFIER_ABI } from './types.js';
-import { ABI_CODER, toString16 } from '../utils.js';
+import { poseidonAbi, rollupAbi, verifierAbi } from './abi.js';
+import { type ScrollApiResponse } from './types.js';
 
 // https://github.com/scroll-tech/scroll-contracts/
 // https://docs.scroll.io/en/developers/ethereum-and-scroll-differences/
 // https://status.scroll.io/
 
 export type ScrollConfig = {
-  ScrollChainCommitmentVerifier: HexAddress;
+  scrollChainCommitmentVerifierAddress: HexAddress;
   apiURL: string;
 };
 
@@ -37,52 +44,64 @@ export type ScrollCommit = RollupCommit<EthProver> & {
 
 export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
   // https://docs.scroll.io/en/developers/scroll-contracts/
-  static readonly mainnetConfig: RollupDeployment<ScrollConfig> = {
-    chain1: CHAINS.MAINNET,
-    chain2: CHAINS.SCROLL,
-    ScrollChainCommitmentVerifier: '0xC4362457a91B2E55934bDCb7DaaF6b1aB3dDf203',
+  static readonly mainnetConfig = {
+    chain1: mainnet.id,
+    chain2: scroll.id,
+    scrollChainCommitmentVerifierAddress:
+      '0xC4362457a91B2E55934bDCb7DaaF6b1aB3dDf203',
     apiURL: 'https://mainnet-api-re.scroll.io/api/',
-  };
-
-  static readonly testnetConfig: RollupDeployment<ScrollConfig> = {
-    chain1: CHAINS.SEPOLIA,
-    chain2: CHAINS.SCROLL_SEPOLIA,
-    ScrollChainCommitmentVerifier: '0x64cb3A0Dcf43Ae0EE35C1C15edDF5F46D48Fa570',
+  } as const satisfies RollupDeployment<ScrollConfig>;
+  static readonly testnetConfig = {
+    chain1: sepolia.id,
+    chain2: scrollSepolia.id,
+    scrollChainCommitmentVerifierAddress:
+      '0x64cb3A0Dcf43Ae0EE35C1C15edDF5F46D48Fa570',
     apiURL: 'https://sepolia-api-re.scroll.io/api/',
-  };
+  } as const satisfies RollupDeployment<ScrollConfig>;
 
-  static async create(providers: ProviderPair, config: ScrollConfig) {
-    const CommitmentVerifier = new Contract(
-      config.ScrollChainCommitmentVerifier,
-      VERIFIER_ABI,
-      providers.provider1
-    );
-    const [rollupAddress, poseidonAddress]: HexAddress[] = await Promise.all([
-      CommitmentVerifier.rollup(),
-      CommitmentVerifier.poseidon(),
+  static async create(clients: ClientPair, config: ScrollConfig) {
+    const commitmentVerifier = {
+      address: config.scrollChainCommitmentVerifierAddress,
+      abi: verifierAbi,
+    } as const;
+    const [rollupAddress, poseidonAddress] = await Promise.all([
+      readContract(clients.client1, {
+        ...commitmentVerifier,
+        functionName: 'rollup',
+      }),
+      readContract(clients.client1, {
+        ...commitmentVerifier,
+        functionName: 'poseidon',
+      }),
     ]);
-    const rollup = new Contract(rollupAddress, ROLLUP_ABI, providers.provider1);
-    const poseidon = new Contract(
-      poseidonAddress,
-      POSEIDON_ABI,
-      providers.provider1
-    );
+
+    const rollup = {
+      address: rollupAddress,
+      abi: rollupAbi,
+    };
+    const poseidon = {
+      address: poseidonAddress,
+      abi: poseidonAbi,
+    };
     return new this(
-      providers,
-      CommitmentVerifier,
+      clients,
       config.apiURL,
+      commitmentVerifier,
       rollup,
       poseidon
     );
   }
   private constructor(
-    providers: ProviderPair,
-    readonly CommitmentVerifier: Contract,
+    clients: ClientPair,
     readonly apiURL: string,
-    readonly rollup: Contract,
-    readonly poseidon: Contract
+    readonly commitmentVerifier: {
+      address: HexAddress;
+      abi: typeof verifierAbi;
+    },
+    readonly rollup: { address: HexAddress; abi: typeof rollupAbi },
+    readonly poseidon: { address: HexAddress; abi: typeof poseidonAbi }
   ) {
-    super(providers);
+    super(clients);
   }
 
   async fetchAPILatestBatchIndex() {
@@ -90,7 +109,7 @@ export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
     // so we can use the same indexer to get the latest commit
     const res = await fetch(new URL('./last_batch_indexes', this.apiURL));
     if (!res.ok) throw new Error(`${res.url}: HTTP(${res.status})`);
-    const json = await res.json();
+    const json: ScrollApiResponse['/last_batch_indexes'] = await res.json();
     return BigInt(json.finalized_index);
   }
   async fetchAPIBatchIndexInfo(batchIndex: bigint) {
@@ -98,7 +117,7 @@ export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
     url.searchParams.set('index', batchIndex.toString());
     const res = await fetch(url);
     if (!res.ok) throw new Error(`${res.url}: HTTP(${res.status})`);
-    const json = await res.json();
+    const json: ScrollApiResponse['/batch'] = await res.json();
     const status: string = json.batch.rollup_status;
     const finalTxHash: HexString32 = json.batch.finalize_tx_hash;
     const l2BlockNumber = BigInt(json.batch.end_block_number);
@@ -117,17 +136,21 @@ export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
     // }
     // throw new Error(`unable to find earlier batch: ${l1BlockNumber}`);
     // 20240830: this is more efficient
-    return this.rollup.lastFinalizedBatchIndex({
-      blockTag: l1BlockNumber - 1n,
+    return readContract(this.client1, {
+      ...this.rollup,
+      functionName: 'lastFinalizedBatchIndex',
+      blockNumber: l1BlockNumber - 1n,
     });
   }
   override async fetchLatestCommitIndex(): Promise<bigint> {
     // TODO: determine how to this w/o relying on indexer
     // note: this doesn't use latestBlockTag
     const [rpc, api] = await Promise.all([
-      this.rollup.lastFinalizedBatchIndex({
+      readContract(this.client1, {
+        ...this.rollup,
+        functionName: 'lastFinalizedBatchIndex',
         blockTag: this.latestBlockTag,
-      }) as Promise<bigint>,
+      }),
       this.fetchAPILatestBatchIndex(),
     ]);
     return rpc > api ? api : rpc;
@@ -142,26 +165,29 @@ export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
     // https://github.com/scroll-tech/scroll/blob/738c85759d0248c005469972a49fc983b031ff1c/contracts/src/L1/rollup/ScrollChain.sol#L228
     // but not every state root is recorded
     // Differences[{310900, 310887, 310873, 310855}] => {13, 14, 18}
-    const receipt = await this.provider1.getTransactionReceipt(
-      commit.finalTxHash
-    );
-    if (!receipt) throw new Error(`no commit tx: ${commit.finalTxHash}`);
-    return this.findFinalizedBatchIndexBefore(BigInt(receipt.blockNumber));
+    const receipt = await getTransactionReceipt(this.client1, {
+      hash: commit.finalTxHash,
+    });
+    return this.findFinalizedBatchIndexBefore(receipt.blockNumber);
   }
   protected override async _fetchCommit(index: bigint): Promise<ScrollCommit> {
     const { status, l2BlockNumber, finalTxHash } =
       await this.fetchAPIBatchIndexInfo(index);
     if (status !== 'finalized') throw new Error(`not finalized: ${status}`);
-    const prover = new EthProver(this.provider2, toString16(l2BlockNumber));
-    return { index, prover, finalTxHash };
+    const prover = new EthProver(this.client2, l2BlockNumber);
+    return {
+      index,
+      prover,
+      finalTxHash,
+    };
   }
   override encodeWitness(
     commit: ScrollCommit,
     proofSeq: ProofSequence
   ): HexString {
-    return ABI_CODER.encode(
-      ['uint256', 'bytes[]', 'bytes'],
-      [commit.index, proofSeq.proofs, proofSeq.order]
+    return encodeAbiParameters(
+      [{ type: 'uint256' }, { type: 'bytes[]' }, { type: 'bytes' }],
+      [commit.index, proofSeq.proofs, toHex(proofSeq.order)]
     );
   }
   override encodeWitnessV1(
@@ -169,15 +195,15 @@ export class ScrollRollup extends AbstractRollupV1<ScrollCommit> {
     proofSeq: ProofSequenceV1
   ): HexString {
     const compressed = proofSeq.storageProofs.map((storageProof) =>
-      concat([
-        toBeHex(proofSeq.accountProof.length, 1),
-        ...proofSeq.accountProof,
-        toBeHex(storageProof.length, 1),
-        ...storageProof,
+      concatHex([
+        toHex(proofSeq.accountProof.length, { size: 1 }),
+        proofSeq.accountProof,
+        toHex(storageProof.length, { size: 1 }),
+        storageProof,
       ])
     );
-    return ABI_CODER.encode(
-      ['tuple(uint256)', 'tuple(bytes, bytes[])'],
+    return encodeAbiParameters(
+      parseAbiParameters('(uint256), (bytes, bytes[])'),
       [[commit.index], ['0x', compressed]]
     );
   }

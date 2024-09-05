@@ -1,8 +1,9 @@
-import { DataRequest } from '../../src/vm.js';
+import { afterAll, expect, test } from 'bun:test';
+import { concat, dataSlice, hexlify, randomBytes, toBeHex } from 'ethers';
 import { EthProver } from '../../src/eth/EthProver.js';
-import { Foundry } from '@adraffy/blocksmith';
-import { hexlify, toBeHex, randomBytes, concat, dataSlice } from 'ethers';
-import { test, afterAll, expect } from 'bun:test';
+import type { HexString, HexString32 } from '../../src/types.js';
+import { DataRequest } from '../../src/vm.js';
+import { Foundry } from '../foundry.js';
 
 test('ClowesConcatSlice', async () => {
   const foundry = await Foundry.launch({ infoLog: false });
@@ -30,7 +31,7 @@ test('ClowesConcatSlice', async () => {
     args: [data, key, VALUE],
   });
 
-  const prover = await EthProver.latest(foundry.provider);
+  const prover = await EthProver.latest(foundry.client);
 
   const req = new DataRequest(2)
     .setTarget(contract.target)
@@ -50,8 +51,8 @@ test('ClowesConcatSlice', async () => {
   const values = await prover.evalRequest(req).then((r) => r.resolveOutputs());
 
   expect(values).toHaveLength(2);
-  expect(values[0]).toStrictEqual(data);
-  expect(values[1]).toStrictEqual(toBeHex(VALUE, 32));
+  expect(values[0]).toStrictEqual(data as HexString);
+  expect(values[1]).toStrictEqual(toBeHex(VALUE, 32) as HexString32);
 });
 
 test('FOLLOW === PUSH_SLOT CONCAT KECCAK SLOT_ZERO SLOT_ADD', async () => {
@@ -67,7 +68,7 @@ test('FOLLOW === PUSH_SLOT CONCAT KECCAK SLOT_ZERO SLOT_ADD', async () => {
       }
     `,
   });
-  const prover = await EthProver.latest(foundry.provider);
+  const prover = await EthProver.latest(foundry.client);
 
   const req1 = new DataRequest()
     .setTarget(contract.target)

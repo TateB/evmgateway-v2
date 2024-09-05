@@ -1,25 +1,23 @@
-import type { BigNumberish, HexString } from './types.js';
-import type { RPCEthGetBlock } from './eth/types.js';
-import { encodeRlp, type RlpStructuredDataish } from 'ethers';
+import { toRlp } from 'viem';
+
+import type { RpcBlock } from './eth/types.js';
+import type { HexString, RecursiveArray } from './types.js';
 
 // https://ethereum.github.io/execution-specs/src/ethereum/rlp.py.html
 
-export function encodeRlpUint(x?: BigNumberish): HexString | undefined {
-  if (x === undefined) return x;
-  const s = BigInt(x).toString(16);
+export function encodeRlpUint(x?: bigint | null): HexString | undefined | null {
+  if (x === undefined || x === null) return x;
+  const s = x.toString(16);
   return s === '0' ? '0x' : s.length & 1 ? `0x0${s}` : `0x${s}`;
-  // same as: return hexlify(toBeArray(x));
 }
 
 export function encodeRlpOptionalList(
-  v: (RlpStructuredDataish | undefined)[]
+  v: (RecursiveArray<HexString> | undefined | null)[]
 ): HexString {
-  return encodeRlp(
-    v.slice(0, 1 + v.findLastIndex((x) => x)).map((x) => x || '0x')
-  );
+  return toRlp(v.slice(0, 1 + v.findLastIndex((x) => x)).map((x) => x || '0x'));
 }
 
-export function encodeRlpBlock(block: RPCEthGetBlock): HexString {
+export function encodeRlpBlock(block: RpcBlock): HexString {
   return encodeRlpOptionalList([
     block.parentHash,
     block.sha3Uncles,

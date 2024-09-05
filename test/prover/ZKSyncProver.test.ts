@@ -1,15 +1,20 @@
 import { Foundry } from '@adraffy/blocksmith';
-import { createProviderPair, providerURL } from '../providers.js';
-import { ZKSyncRollup } from '../../src/zksync/ZKSyncRollup.js';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { ethers } from 'ethers';
-import { describe, test, expect, afterAll } from 'bun:test';
+import type { ClientPair } from '../../src/types.js';
+import type { ZKSyncClient } from '../../src/zksync/types.js';
+import { ZKSyncRollup } from '../../src/zksync/ZKSyncRollup.js';
+import { createClientPair, transportUrl } from '../providers.js';
 
 describe('ZKSyncProver', async () => {
   const config = ZKSyncRollup.mainnetConfig;
-  const rollup = new ZKSyncRollup(createProviderPair(config), config);
+  const rollup = new ZKSyncRollup(
+    createClientPair(config) as unknown as ClientPair<ZKSyncClient>,
+    config
+  );
   const commit = await rollup.fetchLatestCommit();
   const foundry = await Foundry.launch({
-    fork: providerURL(config.chain1),
+    fork: transportUrl(config.chain1),
     infoLog: true,
   });
   afterAll(() => foundry.shutdown());

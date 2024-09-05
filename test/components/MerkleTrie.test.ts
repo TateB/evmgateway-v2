@@ -1,13 +1,15 @@
-import type { HexString, BigNumberish } from '../../src/types.js';
+import { afterAll, expect, test } from 'bun:test';
+import { ethers, type BigNumberish } from 'ethers';
+import { toHex } from 'viem';
+import { getStorageAt } from 'viem/actions';
 import { EthProver } from '../../src/eth/EthProver.js';
 import {
+  NULL_TRIE_HASH,
   proveAccountState,
   proveStorageValue,
-  NULL_TRIE_HASH,
 } from '../../src/eth/merkle.js';
-import { Foundry } from '@adraffy/blocksmith';
-import { ethers } from 'ethers';
-import { afterAll, test, expect } from 'bun:test';
+import type { HexAddress, HexString } from '../../src/types.js';
+import { Foundry } from '../foundry.js';
 
 async function setup() {
   const foundry = await Foundry.launch({ infoLog: false });
@@ -16,7 +18,7 @@ async function setup() {
   return {
     foundry,
     async prover() {
-      const prover = await EthProver.latest(foundry.provider);
+      const prover = await EthProver.latest(foundry.client);
       const stateRoot = await prover.fetchStateRoot();
       return {
         async assertDoesNotExist(target: HexString) {
@@ -46,9 +48,12 @@ async function setup() {
           );
           expect(accountState?.storageRoot).toBe(storageHash);
           const slotValue = proveStorageValue(slot, proof, storageHash);
-          expect(slotValue).toBe(ethers.toBeHex(value, 32));
-          expect(slotValue).toBe(ethers.toBeHex(expected, 32));
-          const liveValue = await prover.provider.getStorage(target, slot);
+          expect(slotValue).toBe(ethers.toBeHex(value, 32) as HexString);
+          expect(slotValue).toBe(ethers.toBeHex(expected, 32) as HexString);
+          const liveValue = await getStorageAt(prover.client, {
+            address: target,
+            slot: toHex(slot),
+          });
           return {
             nullRoot: storageHash === NULL_TRIE_HASH,
             liveValue,
@@ -65,14 +70,18 @@ test(`nonexistent EOAs don't exist`, async () => {
   const T = await setup();
   const P = await T.prover();
   for (let i = 0; i < 5; i++) {
-    await P.assertDoesNotExist(ethers.toBeHex(1, 20));
+    await P.assertDoesNotExist(ethers.toBeHex(1, 20) as HexAddress);
   }
 });
 
 test('EOA with balance exists', async () => {
   const T = await setup();
   const P = await T.prover();
-  const V = await P.assertValue(T.foundry.wallets.admin.address, 0, 0);
+  const V = await P.assertValue(
+    T.foundry.wallets.admin.address as HexAddress,
+    0,
+    0
+  );
   expect(V.nullRoot).toBeTrue();
 });
 

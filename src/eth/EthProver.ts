@@ -1,20 +1,23 @@
-import type { EncodedProof, HexString, Provider } from '../types.js';
-import type {
-  EthAccountProof,
-  EthProof,
-  EthStorageProof,
-  RPCEthGetBlock,
-  RPCEthGetProof,
-} from './types.js';
-import { AbstractProver, makeStorageKey, type Need } from '../vm.js';
-import { ZeroHash, toBeHex } from 'ethers';
 import {
-  ABI_CODER,
-  NULL_CODE_HASH,
-  sendRetry,
-  toString16,
-  withResolvers,
-} from '../utils.js';
+  encodeAbiParameters,
+  toHex,
+  zeroHash,
+  type Address,
+  type Client,
+  type GetProofReturnType,
+} from 'viem';
+import {
+  getBlock,
+  getBlockNumber,
+  getCode,
+  getProof,
+  getStorageAt,
+} from 'viem/actions';
+
+import type { EncodedProof, HexString } from '../types.js';
+import { NULL_CODE_HASH, withResolvers } from '../utils.js';
+import { AbstractProver, makeStorageKey, type Need } from '../vm.js';
+import type { EthAccountProof, EthProof, EthStorageProof } from './types.js';
 
 function isContract(proof: EthAccountProof) {
   return (
@@ -23,47 +26,43 @@ function isContract(proof: EthAccountProof) {
 }
 
 function encodeProof(proof: EthProof): EncodedProof {
-  return ABI_CODER.encode(['bytes[]'], [proof]);
+  return encodeAbiParameters([{ type: 'bytes[]' }], [proof]);
 }
 
 export class EthProver extends AbstractProver {
-  static async latest(provider: Provider) {
-    return new this(provider, toString16(await provider.getBlockNumber()));
+  static async latest(client: Client) {
+    const blockNumber = await getBlockNumber(client);
+    return new this(client, blockNumber);
   }
-  proofRetryCount = 0;
   constructor(
-    readonly provider: Provider,
-    readonly block: HexString
+    readonly client: Client,
+    readonly blockNumber: bigint
   ) {
     super();
   }
+
   async fetchStateRoot() {
     // this is just a convenience
-    const blockInfo: RPCEthGetBlock = await this.provider.send(
-      'eth_getBlockByNumber',
-      [this.block, false]
-    );
+    const blockInfo = await getBlock(this.client, {
+      blockNumber: this.blockNumber,
+      includeTransactions: false,
+    });
     return blockInfo.stateRoot;
   }
   async fetchProofs(
     target: HexString,
     slots: bigint[] = []
-  ): Promise<RPCEthGetProof> {
-    const ps = [];
+  ): Promise<GetProofReturnType> {
+    const ps: Promise<GetProofReturnType>[] = [];
     for (let i = 0; ; ) {
       ps.push(
-        sendRetry<RPCEthGetProof>(
-          this.provider,
-          'eth_getProof',
-          [
-            target,
-            slots
-              .slice(i, (i += this.proofBatchSize))
-              .map((slot) => toBeHex(slot, 32)),
-            this.block,
-          ],
-          this.proofRetryCount
-        )
+        getProof(this.client, {
+          address: target,
+          storageKeys: slots
+            .slice(i, (i += this.proofBatchSize))
+            .map((slot) => toHex(slot, { size: 32 })),
+          blockNumber: this.blockNumber,
+        })
       );
       if (i >= slots.length) break;
     }
@@ -76,8 +75,8 @@ export class EthProver extends AbstractProver {
   async getProofs(
     target: HexString,
     slots: bigint[] = []
-  ): Promise<RPCEthGetProof> {
-    target = target.toLowerCase();
+  ): Promise<GetProofReturnType> {
+    target = target.toLowerCase() as Address;
     const missing: number[] = []; // indices of slots we dont have proofs for
     const { promise, resolve, reject } = withResolvers(); // create a blocker
     // 20240708: must setup blocks before await
@@ -135,39 +134,46 @@ export class EthProver extends AbstractProver {
     target: HexString,
     slot: bigint
   ): Promise<HexString> {
-    target = target.toLowerCase();
+    target = target.toLowerCase() as HexString;
     // check to see if we know this target isn't a contract without invoking provider
     // this is almost equivalent to: await isContract(target)
     const accountProof: EthAccountProof | undefined =
       await this.proofLRU.touch(target);
     if (accountProof && !isContract(accountProof)) {
-      return ZeroHash;
+      return zeroHash;
     }
     // check to see if we've already have a proof for this value
     const storageKey = makeStorageKey(target, slot);
     const storageProof: EthStorageProof | undefined =
       await this.proofLRU.touch(storageKey);
     if (storageProof) {
-      return toBeHex(storageProof.value, 32);
+      return toHex(storageProof.value, { size: 32 });
     }
     if (this.fastCache) {
-      return this.fastCache.get(storageKey, () =>
-        this.provider.getStorage(target, slot, this.block)
+      return this.fastCache.get(
+        storageKey,
+        () =>
+          getStorageAt(this.client, {
+            address: target,
+            slot: toHex(slot),
+          }) as Promise<HexString>
       );
     }
     const proofs = await this.getProofs(target, [slot]);
-    return proofs.storageProof[0].value;
+    return toHex(proofs.storageProof[0].value, { size: 32 });
   }
   override async isContract(target: HexString) {
-    target = target.toLowerCase();
+    target = target.toLowerCase() as HexString;
     if (this.fastCache) {
       return this.fastCache.get(target, async () => {
-        const code = await this.provider.getCode(target, this.block);
-        return code.length > 2;
+        const code = await getCode(this.client, {
+          address: target,
+          blockNumber: this.blockNumber,
+        });
+        return !!code && code.length > 2;
       });
-    } else {
-      return isContract(await this.getProofs(target, []));
     }
+    return isContract(await this.getProofs(target, []));
   }
   override async prove(needs: Need[]) {
     // reduce an ordered list of needs into a deduplicated list of proofs

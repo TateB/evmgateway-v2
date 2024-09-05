@@ -1,5 +1,5 @@
-import type { BytesLike, HexString } from '../src/types.js';
-import { ethers } from 'ethers';
+import { ethers, type BytesLike } from 'ethers';
+import type { HexString } from '../src/types.js';
 
 // convenience to decode a single ABI type
 // export function decodeType(type: string, data: BytesLike) {
@@ -15,13 +15,13 @@ export function decodeStorageArray(step: number, data: BytesLike): HexString[] {
     const per = (32 / step) | 0;
     return Array.from({ length: n }, (_, i) => {
       const x = 64 + ((i / per) << 5) - (i % per) * step;
-      return ethers.hexlify(v.subarray(x - step, x));
+      return ethers.hexlify(v.subarray(x - step, x)) as HexString;
     });
   } else {
     const per = (step + 31) >> 5; // number of slots spanned
     return Array.from({ length: n }, (_, i) => {
       const x = (1 + i * per) << 5;
-      return ethers.hexlify(v.subarray(x, x + step));
+      return ethers.hexlify(v.subarray(x, x + step)) as HexString;
     });
   }
 }
@@ -32,5 +32,11 @@ export function encodeShortString(s: string): HexString {
   const u = new Uint8Array(32);
   u.set(v);
   u[31] = v.length << 1;
-  return ethers.hexlify(u);
+  return ethers.hexlify(u) as HexString;
 }
+
+export const createEndpoint = (server: ReturnType<typeof Bun.serve>) =>
+  `http://${server.hostname}:${server.port}`;
+
+export const randomPort = () =>
+  Math.floor(Math.random() * (65535 - 3000 + 1)) + 3000;

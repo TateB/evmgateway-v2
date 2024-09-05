@@ -1,40 +1,43 @@
-import type { RPCZKSyncGetProof, ZKSyncStorageProof } from './types.js';
-import type {
-  Provider,
-  HexAddress,
-  HexString,
-  EncodedProof,
-} from '../types.js';
+import { encodeAbiParameters, toHex } from 'viem';
+import { getStorageAt } from 'viem/actions';
+
+import type { EncodedProof, HexAddress, HexString } from '../types.js';
+import { withResolvers } from '../utils.js';
 import {
   AbstractProver,
   makeStorageKey,
   type Need,
   type ProofSequence,
 } from '../vm.js';
-import { toBeHex } from 'ethers';
-import { ABI_CODER, withResolvers } from '../utils.js';
+import type {
+  RPCZKSyncGetProof,
+  ZKSyncClient,
+  ZKSyncStorageProof,
+} from './types.js';
 
 // https://docs.zksync.io/build/api-reference/zks-rpc#zks_getproof
 // https://github.com/matter-labs/era-contracts/blob/fd4aebcfe8833b26e096e87e142a5e7e4744f3fa/system-contracts/bootloader/bootloader.yul#L458
 export const ZKSYNC_ACCOUNT_CODEHASH =
-  '0x0000000000000000000000000000000000008002';
+  '0x0000000000000000000000000000000000008002' as const;
 
 function encodeStorageProof(proof: ZKSyncStorageProof) {
-  return ABI_CODER.encode(
-    ['bytes32', 'uint64', 'bytes32[]'],
-    [proof.value, proof.index, proof.proof]
+  return encodeAbiParameters(
+    [{ type: 'bytes32' }, { type: 'uint64' }, { type: 'bytes32[]' }],
+    [proof.value, BigInt(proof.index), proof.proof]
   );
 }
 
 export class ZKSyncProver extends AbstractProver {
-  static async latest(provider: Provider) {
+  static async latest(client2: ZKSyncClient) {
     return new this(
-      provider,
-      Number(await provider.send('zks_L1BatchNumber', []))
+      client2,
+      await client2
+        .request({ method: 'zks_L1BatchNumber', params: [] })
+        .then((x) => Number(x))
     );
   }
   constructor(
-    readonly provider: Provider,
+    readonly client2: ZKSyncClient,
     readonly batchIndex: number
   ) {
     super();
@@ -48,10 +51,10 @@ export class ZKSyncProver extends AbstractProver {
     return !/^0x0+$/.test(codeHash);
   }
   override async getStorage(
-    target: HexAddress,
+    target_: HexAddress,
     slot: bigint
   ): Promise<HexString> {
-    target = target.toLowerCase();
+    const target = target_.toLowerCase() as HexAddress;
     const storageKey = makeStorageKey(target, slot);
     const storageProof: ZKSyncStorageProof | undefined =
       await this.proofLRU.touch(storageKey);
@@ -59,8 +62,13 @@ export class ZKSyncProver extends AbstractProver {
       return storageProof.value;
     }
     if (this.fastCache) {
-      return this.fastCache.get(storageKey, () =>
-        this.provider.getStorage(target, slot)
+      return this.fastCache.get(
+        storageKey,
+        () =>
+          getStorageAt(this.client2, {
+            address: target,
+            slot: toHex(slot),
+          }) as Promise<HexString>
       );
     }
     const vs = await this.getStorageProofs(target, [slot]);
@@ -72,7 +80,7 @@ export class ZKSyncProver extends AbstractProver {
     const refs: Ref[] = [];
     let nullRef: Ref | undefined;
     const createRef = () => {
-      const ref = { id: refs.length, proof: '0x' };
+      const ref = { id: refs.length, proof: '0x' } as const;
       refs.push(ref);
       return ref;
     };
@@ -114,8 +122,8 @@ export class ZKSyncProver extends AbstractProver {
       order: Uint8Array.from(order),
     };
   }
-  async getStorageProofs(target: HexString, slots: bigint[]) {
-    target = target.toLowerCase();
+  async getStorageProofs(target_: HexString, slots: bigint[]) {
+    const target = target_.toLowerCase() as HexString;
     const missing: number[] = [];
     const { promise, resolve, reject } = withResolvers();
     const storageProofs: (
@@ -156,13 +164,16 @@ export class ZKSyncProver extends AbstractProver {
     const ps: Promise<RPCZKSyncGetProof>[] = [];
     for (let i = 0; i < slots.length; ) {
       ps.push(
-        this.provider.send('zks_getProof', [
-          target,
-          slots
-            .slice(i, (i += this.proofBatchSize))
-            .map((slot) => toBeHex(slot, 32)),
-          this.batchIndex,
-        ])
+        this.client2.request({
+          method: 'zks_getProof',
+          params: [
+            target,
+            slots
+              .slice(i, (i += this.proofBatchSize))
+              .map((slot) => toHex(slot, { size: 32 })),
+            this.batchIndex,
+          ],
+        })
       );
     }
     const vs = await Promise.all(ps);

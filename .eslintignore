@@ -2,3 +2,4 @@ lib/
 dist/
 junk/
 test/debug/
+cache/

@@ -1,15 +1,20 @@
 import { Foundry } from '@adraffy/blocksmith';
-import { createProviderPair, providerURL } from '../providers.js';
-import { LineaRollup } from '../../src/linea/LineaRollup.js';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { ethers } from 'ethers';
-import { describe, test, expect, afterAll } from 'bun:test';
+import { LineaRollup } from '../../src/linea/LineaRollup.js';
+import type { LineaClient } from '../../src/linea/types.js';
+import type { ClientPair } from '../../src/types.js';
+import { createClientPair, transportUrl } from '../providers.js';
 
 describe('LineaProver', async () => {
   const config = LineaRollup.mainnetConfig;
-  const gateway = new LineaRollup(createProviderPair(config), config);
+  const gateway = new LineaRollup(
+    createClientPair(config) as unknown as ClientPair<LineaClient>,
+    config
+  );
   const commit = await gateway.fetchLatestCommit();
   const foundry = await Foundry.launch({
-    fork: providerURL(config.chain1),
+    fork: transportUrl(config.chain1),
     infoLog: false,
   });
   afterAll(() => foundry.shutdown());
@@ -17,7 +22,7 @@ describe('LineaProver', async () => {
   const verifier = await foundry.deploy({
     file: 'LineaSelfVerifier',
     libs: {
-      SparseMerkleProof: config.SparseMerkleProof,
+      SparseMerkleProof: config.sparseMerkleProofAddress,
     },
   });
 

@@ -54,13 +54,13 @@ export class CachedValue<T> {
 
 type CacheRow<T> = [exp: number, promise: Promise<T>];
 
-export interface CacheMap<K, V> {
-  cache(key: K, fn: (key: K) => Promise<V>): Promise<V>;
+export interface CacheMap<key, value> {
+  cache(key: key, fn: (key: key) => Promise<value>): Promise<value>;
 }
 
-export class CachedMap<K, V> {
-  private readonly cached: Map<K, CacheRow<V>> = new Map();
-  private readonly pending: Map<K, Promise<V>> = new Map();
+export class CachedMap<key, value> {
+  private readonly cached: Map<key, CacheRow<value>> = new Map();
+  private readonly pending: Map<key, Promise<value>> = new Map();
   private timer: Timer | undefined;
   private timer_t: number = Infinity;
   errorMs = 250; // how long to cache a rejected promise
@@ -112,7 +112,11 @@ export class CachedMap<K, V> {
   // async resolvePending() {
   // 	await Promise.all(Array.from(this.pending.values()));
   // }
-  set(key: K, value: V | Promise<V>, ms?: number) {
+  set<valueOrOverride = value>(
+    key: key,
+    value: valueOrOverride | Promise<valueOrOverride>,
+    ms?: number
+  ) {
     this.delete(key);
     ms ??= this.cacheMs;
     if (this.maxCached > 0 && ms > 0) {
@@ -127,15 +131,18 @@ export class CachedMap<K, V> {
         }
       }
       const exp = clock() + ms;
-      this.cached.set(key, [exp, Promise.resolve(value)]); // add cache entry
+      this.cached.set(key, [
+        exp,
+        Promise.resolve(value) as unknown as Promise<value>,
+      ]); // add cache entry
       this.schedule(exp);
     }
   }
-  delete(key: K) {
+  delete(key: key) {
     this.cached.delete(key);
     this.pending.delete(key);
   }
-  cachedRemainingMs(key: K): number {
+  cachedRemainingMs(key: key): number {
     const c = this.cached.get(key);
     if (c) {
       const rem = c[0] - clock();
@@ -143,36 +150,53 @@ export class CachedMap<K, V> {
     }
     return 0;
   }
-  cachedValue(key: K): Promise<V> | undefined {
+  cachedValue<valueOrOverride = value>(
+    key: key
+  ): Promise<valueOrOverride> | undefined {
     const c = this.cached.get(key);
     if (c) {
       const [exp, q] = c;
-      if (exp > clock()) return q; // still valid
+      if (exp > clock()) return q as unknown as Promise<valueOrOverride>; // still valid
       this.cached.delete(key); // expired
     }
     return; // ree
   }
-  cachedKeys(): IterableIterator<K> {
+  cachedKeys(): IterableIterator<key> {
     return this.cached.keys();
   }
-  peek(key: K): Promise<V> | undefined {
-    return this.cachedValue(key) ?? this.pending.get(key);
+  peek<valueOrOverride = value>(
+    key: key
+  ): Promise<valueOrOverride> | undefined {
+    return (
+      this.cachedValue<valueOrOverride>(key) ??
+      (this.pending.get(key) as unknown as Promise<valueOrOverride>)
+    );
   }
-  setPending(key: K, value: Promise<V>, ms?: number): Promise<V> {
+  setPending<valueOrOverride = value>(
+    key: key,
+    value: Promise<valueOrOverride>,
+    ms?: number
+  ): Promise<valueOrOverride> {
     const p = value
       .catch(() => ERR)
       .then((x) => {
         // we got an answer
-        if (this.pending.get(key) === p) {
+        if (
+          (this.pending.get(key) as Promise<valueOrOverride> | undefined) === p
+        ) {
           // remove from pending
           this.set(key, value, x === ERR ? this.errorMs : ms); // add original to cache if existed
         }
         return value; // resolve to original
       });
-    this.pending.set(key, p); // remember in-flight
+    this.pending.set(key, p as unknown as Promise<value>); // remember in-flight
     return p;
   }
-  get(key: K, fn: (key: K) => Promise<V>, ms?: number): Promise<V> {
+  get<valueOrOverride = value>(
+    key: key,
+    fn: (key: key) => Promise<valueOrOverride>,
+    ms?: number
+  ): Promise<valueOrOverride> {
     return this.peek(key) ?? this.setPending(key, fn(key), ms);
   }
 }

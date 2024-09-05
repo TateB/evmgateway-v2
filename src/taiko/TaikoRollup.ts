@@ -1,32 +1,28 @@
+import { encodeAbiParameters, toHex } from 'viem';
+import { getBlock, readContract } from 'viem/actions';
+import { mainnet, taiko } from 'viem/chains';
+
+import { EthProver } from '../eth/EthProver.js';
 import {
   AbstractRollup,
   type RollupCommit,
   type RollupDeployment,
 } from '../rollup.js';
 import type {
+  ClientPair,
   HexAddress,
   HexString,
   HexString32,
-  ProviderPair,
 } from '../types.js';
-import { Contract } from 'ethers';
-import { CHAINS } from '../chains.js';
-import { EthProver } from '../eth/EthProver.js';
-import {
-  TAIKO_ABI,
-  type ABITaikoConfig,
-  type ABITaikoLastSyncedBlock,
-} from './types.js';
-import { ABI_CODER, toString16 } from '../utils.js';
-import type { RPCEthGetBlock } from '../eth/types.js';
 import type { ProofSequence } from '../vm.js';
+import { taikoL1Abi } from './abi.js';
 
 // https://github.com/taikoxyz/taiko-mono/tree/main/packages/protocol/contracts
 // https://docs.taiko.xyz/network-reference/differences-from-ethereum
 // https://status.taiko.xyz/
 
 export type TaikoConfig = {
-  TaikoL1: HexAddress;
+  taikoL1Address: HexAddress;
   // some multiple of the stateRootSyncInternal
   // use 0 to step by 1
   commitBatchSpan: number;
@@ -37,45 +33,47 @@ export type TaikoCommit = RollupCommit<EthProver> & {
 };
 
 export class TaikoRollup extends AbstractRollup<TaikoCommit> {
-  // https://docs.taiko.xyz/network-reference/mainnet-addresses
-  static readonly mainnetConfig: RollupDeployment<TaikoConfig> = {
-    chain1: CHAINS.MAINNET,
-    chain2: CHAINS.TAIKO,
-    TaikoL1: '0x06a9Ab27c7e2255df1815E6CC0168d7755Feb19a', // based.taiko.eth
+  static readonly mainnetConfig = {
+    chain1: mainnet.id,
+    chain2: taiko.id,
+    taikoL1Address: '0x06a9Ab27c7e2255df1815E6CC0168d7755Feb19a', // based.taiko.eth
     commitBatchSpan: 1,
-  };
+  } as const satisfies RollupDeployment<TaikoConfig>;
 
-  static async create(providers: ProviderPair, config: TaikoConfig) {
-    const TaikoL1 = new Contract(
-      config.TaikoL1,
-      TAIKO_ABI,
-      providers.provider1
+  static async create(clients: ClientPair, config: TaikoConfig) {
+    const taikoL1 = {
+      address: config.taikoL1Address,
+      abi: taikoL1Abi,
+    } as const;
+    if (config.commitBatchSpan <= 0) return new this(clients, taikoL1, 1n);
+
+    const onchainConfig = await readContract(clients.client1, {
+      ...taikoL1,
+      functionName: 'getConfig',
+    });
+    const commitStep = BigInt(
+      onchainConfig.stateRootSyncInternal * config.commitBatchSpan
     );
-    let commitStep;
-    if (config.commitBatchSpan > 0) {
-      const cfg: ABITaikoConfig = await TaikoL1.getConfig();
-      commitStep = cfg.stateRootSyncInternal * BigInt(config.commitBatchSpan);
-    } else {
-      commitStep = 1n;
-    }
-    return new this(providers, TaikoL1, commitStep);
+    return new this(clients, taikoL1, commitStep);
   }
   private constructor(
-    providers: ProviderPair,
-    readonly TaikoL1: Contract,
+    clients: ClientPair,
+    readonly taikoL1: { address: HexAddress; abi: typeof taikoL1Abi },
     readonly commitStep: bigint
   ) {
-    super(providers);
+    super(clients);
   }
 
   override async fetchLatestCommitIndex(): Promise<bigint> {
     // https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/contracts/L1/libs/LibUtils.sol
     // by definition this is shouldSyncStateRoot()
     // eg. (block % 16) == 15
-    const res: ABITaikoLastSyncedBlock = await this.TaikoL1.getLastSyncedBlock({
+    const [blockId] = await readContract(this.client1, {
+      ...this.taikoL1,
+      functionName: 'getLastSyncedBlock',
       blockTag: this.latestBlockTag,
     });
-    return res.blockId;
+    return blockId;
   }
   protected override async _fetchParentCommitIndex(
     commit: TaikoCommit
@@ -88,21 +86,29 @@ export class TaikoRollup extends AbstractRollup<TaikoCommit> {
     return commit.index - this.commitStep;
   }
   protected override async _fetchCommit(index: bigint): Promise<TaikoCommit> {
-    const blockInfo: RPCEthGetBlock | null = await this.provider2.send(
-      'eth_getBlockByNumber',
-      [toString16(index), false]
-    );
-    if (!blockInfo) throw new Error('no block');
-    const prover = new EthProver(this.provider2, blockInfo.number);
-    return { index, prover, parentHash: blockInfo.parentHash };
+    const block = await getBlock(this.client2, {
+      blockNumber: index,
+      includeTransactions: false,
+    });
+    const prover = new EthProver(this.client2, block.number);
+    return {
+      index,
+      prover,
+      parentHash: block.parentHash,
+    };
   }
   override encodeWitness(
     commit: TaikoCommit,
     proofSeq: ProofSequence
   ): HexString {
-    return ABI_CODER.encode(
-      ['uint256', 'bytes32', 'bytes[]', 'bytes'],
-      [commit.index, commit.parentHash, proofSeq.proofs, proofSeq.order]
+    return encodeAbiParameters(
+      [
+        { type: 'uint256' },
+        { type: 'bytes32' },
+        { type: 'bytes[]' },
+        { type: 'bytes' },
+      ],
+      [commit.index, commit.parentHash, proofSeq.proofs, toHex(proofSeq.order)]
     );
   }
 

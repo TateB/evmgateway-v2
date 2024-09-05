@@ -1,5 +1,6 @@
-import type { HexString, BigNumberish, BytesLike } from './types.js';
-import { ZeroAddress, hexlify, toBeHex, toUtf8Bytes, getBytes } from 'ethers';
+import { hexToBytes, toHex, zeroAddress, type Address } from 'viem';
+
+import type { HexString } from './types.js';
 import { DataRequest } from './vm.js';
 
 // export const GATEWAY_ABI = new ethers.Interface([
@@ -19,7 +20,7 @@ const OPERAND_MASK = 0x1f;
 
 export class DataRequestV1 {
   constructor(
-    public target: HexString = ZeroAddress,
+    public target: Address = zeroAddress,
     readonly commands: HexString[] = [],
     readonly constants: HexString[] = [],
     private readonly buf: number[] = []
@@ -32,13 +33,13 @@ export class DataRequestV1 {
       this.buf.slice()
     );
   }
-  private addConst(x: BytesLike) {
+  private addConst(x: HexString) {
     if (this.constants.length >= MAX_CONSTS)
       throw new Error('constants overflow');
-    this.constants.push(hexlify(x));
+    this.constants.push(x);
     return this.constants.length - 1;
   }
-  private start(flags: number, slot: BigNumberish) {
+  private start(flags: number, slot: bigint | number) {
     this.end();
     this.buf.push(flags);
     return this.offset(slot);
@@ -49,13 +50,13 @@ export class DataRequestV1 {
     if (buf.length < 32 && buf[buf.length - 1] != OP_END) buf.push(OP_END);
     const bytes32 = new Uint8Array(32);
     bytes32.set(buf);
-    this.commands.push(hexlify(bytes32));
+    this.commands.push(toHex(bytes32));
     buf.length = 0;
   }
-  getStatic(slot: BigNumberish) {
+  getStatic(slot: bigint | number) {
     return this.start(0, slot);
   }
-  getDynamic(slot: BigNumberish) {
+  getDynamic(slot: bigint | number) {
     return this.start(FLAG_DYNAMIC, slot);
   }
   ref(i: number) {
@@ -64,18 +65,18 @@ export class DataRequestV1 {
     this.buf.push(OP_FOLLOW_REF | i);
     return this;
   }
-  element(x: BigNumberish) {
-    return this.elementBytes(toBeHex(x, 32));
+  element(x: bigint | number) {
+    return this.elementBytes(toHex(x, { size: 32 }));
   }
   elementStr(s: string) {
-    return this.elementBytes(toUtf8Bytes(s));
+    return this.elementBytes(toHex(s));
   }
-  elementBytes(x: BytesLike) {
+  elementBytes(x: HexString) {
     this.buf.push(OP_FOLLOW_CONST | this.addConst(x));
     return this;
   }
-  offset(x: BigNumberish) {
-    this.buf.push(OP_ADD_CONST | this.addConst(toBeHex(x, 32)));
+  offset(x: bigint | number) {
+    this.buf.push(OP_ADD_CONST | this.addConst(toHex(x, { size: 32 })));
     return this;
   }
   // encodeCall() {
@@ -88,9 +89,9 @@ export class DataRequestV1 {
     req.setTarget(this.target);
     for (const cmd of this.commands) {
       try {
-        const v = getBytes(cmd);
+        const v = hexToBytes(cmd);
         // before ADD_CONST was added first op is initial slot offset
-        req.setSlot(this.constants[v[1] & OPERAND_MASK]);
+        req.setSlot(BigInt(this.constants[v[1] & OPERAND_MASK]));
         for (let i = 2; i < v.length; i++) {
           const op = v[i];
           if (op === OP_END) break;
