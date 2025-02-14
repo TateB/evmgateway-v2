@@ -1,16 +1,12 @@
 name: Unruggable Gateways CI
 on: [push]
 defaults:
- run:
-  working-directory: ./
+  run:
+    working-directory: ./
 jobs:
   test:
-    name: Test v2 on Node ${{ matrix.node }} and ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        node: ['20.x']
-        os: [ubuntu-latest]
+    name: Test External Gateways
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,10 +16,10 @@ jobs:
         with:
           bun-version: 1.1.26
 
-      - name: Use Node ${{ matrix.node }}
+      - name: Use Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 20
 
       - name: Pull & update submodules recursively
         run: |
@@ -31,7 +27,7 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1.3.1
-              
+
       - name: Install Dependencies
         run: bun install
 
@@ -46,25 +42,5 @@ jobs:
       - name: Build
         run: forge build
 
-      - name: Test Components (uses node internally)
-        run: bun run test-components
-
-      - name: Test Gateways (uses node internally)
-        run: bun run test-gateways
-  lint:
-    name: Lint v2
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Use Bun 1.1.26
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: 1.1.26
-
-      - name: Install Dependencies
-        run: bun install
-
-      - name: Lint
-        run: bun run lint
+      - name: Test External Gateways
+        run: bun run test-external

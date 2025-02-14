@@ -1,48 +1,48 @@
-import type { Chain, ChainPair, HexAddress } from '../../src/types.js';
-import type { RollupDeployment } from '../../src/rollup.js';
+import { type DeployedContract, Foundry } from '@adraffy/blocksmith';
+import { serve } from '@resolverworks/ezccip/serve';
+import { afterAll, beforeAll, describe } from 'bun:test';
+import { randomBytes, SigningKey } from 'ethers/crypto';
+import { chainName, CHAINS } from '../../src/chains.js';
+import { EthProver } from '../../src/eth/EthProver.js';
+import { EthSelfRollup } from '../../src/eth/EthSelfRollup.js';
 import { Gateway } from '../../src/gateway.js';
+import { type LineaConfig, LineaRollup } from '../../src/linea/LineaRollup.js';
+import { DoubleNitroRollup } from '../../src/nitro/DoubleNitroRollup.js';
+import { type NitroConfig, NitroRollup } from '../../src/nitro/NitroRollup.js';
+import {
+  type OPFaultConfig,
+  OPFaultRollup,
+} from '../../src/op/OPFaultRollup.js';
+import { type OPConfig, OPRollup } from '../../src/op/OPRollup.js';
+import type { RollupDeployment } from '../../src/rollup.js';
+import {
+  type ScrollConfig,
+  ScrollRollup,
+} from '../../src/scroll/ScrollRollup.js';
+import { type TaikoConfig, TaikoRollup } from '../../src/taiko/TaikoRollup.js';
+import { TrustedRollup } from '../../src/TrustedRollup.js';
+import type { Chain, ChainPair, HexAddress } from '../../src/types.js';
+import {
+  type ZKSyncConfig,
+  ZKSyncRollup,
+} from '../../src/zksync/ZKSyncRollup.js';
 import {
   createProvider,
   createProviderPair,
   providerURL,
 } from '../providers.js';
-import { chainName, CHAINS } from '../../src/chains.js';
-import { serve } from '@resolverworks/ezccip/serve';
-import { type DeployedContract, Foundry } from '@adraffy/blocksmith';
 import { runSlotDataTests } from './tests.js';
-import { type OPConfig, OPRollup } from '../../src/op/OPRollup.js';
-import {
-  type OPFaultConfig,
-  OPFaultRollup,
-} from '../../src/op/OPFaultRollup.js';
-import {
-  type ScrollConfig,
-  ScrollRollup,
-} from '../../src/scroll/ScrollRollup.js';
-import { type LineaConfig, LineaRollup } from '../../src/linea/LineaRollup.js';
-import { type TaikoConfig, TaikoRollup } from '../../src/taiko/TaikoRollup.js';
-import { type NitroConfig, NitroRollup } from '../../src/nitro/NitroRollup.js';
-import { DoubleNitroRollup } from '../../src/nitro/DoubleNitroRollup.js';
-import {
-  type ZKSyncConfig,
-  ZKSyncRollup,
-} from '../../src/zksync/ZKSyncRollup.js';
-import { EthSelfRollup } from '../../src/eth/EthSelfRollup.js';
-import { TrustedRollup } from '../../src/TrustedRollup.js';
-import { EthProver } from '../../src/eth/EthProver.js';
-import { randomBytes, SigningKey } from 'ethers/crypto';
-import { afterAll } from 'bun:test';
-import { describe } from '../bun-describe-fix.js';
 
 export function testName(
   { chain1, chain2, chain3 }: ChainPair & { chain3?: Chain },
-  { reverse = false, unfinalized = false } = {}
+  { reverse = false, unfinalized = false, endpoint = '' } = {}
 ) {
   const arrow = unfinalized ? ' =!=> ' : ' => ';
   const chains = [chain1, chain2];
   if (chain3 !== undefined) chains.push(chain3);
   const names = chains.map(chainName);
   if (reverse) names.reverse();
+  if (endpoint) names.unshift('EXTERNAL');
   return names.join(arrow);
 }
 
@@ -52,7 +52,19 @@ type TestOptions = {
   log?: boolean;
   skipCI?: boolean;
   skipZero?: boolean;
+  desc?: (...params: Parameters<typeof describe>) => void;
 };
+
+export type TestState = {
+  verifier: DeployedContract;
+  reader: DeployedContract;
+};
+
+const createTestState = (): TestState =>
+  ({
+    verifier: undefined,
+    reader: undefined,
+  }) as unknown as TestState;
 
 export async function quickTest(
   verifier: DeployedContract,
@@ -71,7 +83,7 @@ export async function setupTests(
   verifier: DeployedContract,
   opts: TestOptions,
   configure?: (fetcher: DeployedContract) => Promise<void>
-) {
+): Promise<TestState> {
   const foundry = Foundry.of(verifier);
   const reader = await foundry.deploy({
     file: 'SlotDataReader',
@@ -81,19 +93,37 @@ export async function setupTests(
     await foundry.confirm(reader.setPointer(opts.slotDataPointer));
   }
   await configure?.(reader);
-  runSlotDataTests(reader, !!opts.slotDataPointer, !!opts.skipZero);
+  return { verifier, reader };
 }
 
 function shouldSkip(opts: TestOptions) {
   return !!opts.skipCI && !!process.env.IS_CI;
 }
 
+const createTestSuite = (
+  name: string,
+  opts: TestOptions,
+  setupFunction: () => Promise<TestState>
+) => {
+  const invoke = opts.desc ?? describe;
+  const state = createTestState();
+  invoke(name, () => {
+    beforeAll(async () => {
+      const newState = await setupFunction();
+      state.verifier = newState.verifier;
+      state.reader = newState.reader;
+    });
+    runSlotDataTests(state, !!opts.slotDataPointer, !!opts.skipZero);
+  });
+};
+
 export function testOP(
   config: RollupDeployment<OPConfig>,
   opts: TestOptions & { minAgeSec?: number }
 ) {
-  describe.skipIf(shouldSkip(opts))(
+  return createTestSuite(
     testName(config, { unfinalized: !!opts.minAgeSec }),
+    opts,
     async () => {
       const rollup = new OPRollup(
         createProviderPair(config),
@@ -122,7 +152,7 @@ export function testOP(
         ],
         libs: { GatewayVM },
       });
-      await setupTests(verifier, opts);
+      return setupTests(verifier, opts);
     }
   );
 }
@@ -131,8 +161,12 @@ export function testOPFault(
   config: RollupDeployment<OPFaultConfig>,
   opts: TestOptions & { minAgeSec?: number; endpoint?: string }
 ) {
-  describe.skipIf(shouldSkip(opts))(
-    testName(config, { unfinalized: !!opts.minAgeSec }),
+  return createTestSuite(
+    testName(config, {
+      unfinalized: !!opts.minAgeSec,
+      endpoint: opts.endpoint,
+    }),
+    opts,
     async () => {
       const rollup = new OPFaultRollup(
         createProviderPair(config),
@@ -170,7 +204,7 @@ export function testOPFault(
         ],
         libs: { GatewayVM },
       });
-      await setupTests(verifier, opts);
+      return setupTests(verifier, opts);
     }
   );
 }
@@ -179,41 +213,45 @@ export function testScroll(
   config: RollupDeployment<ScrollConfig>,
   opts: TestOptions & { endpoint?: string }
 ) {
-  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
-    const rollup = new ScrollRollup(createProviderPair(config), config);
-    const foundry = await Foundry.launch({
-      fork: providerURL(config.chain1),
-      infoLog: !!opts.log,
-    });
-    afterAll(foundry.shutdown);
-    const gateway = new Gateway(rollup);
-    const ccip = await serve(gateway, { protocol: 'raw', log: !!opts.log });
-    afterAll(ccip.shutdown);
-    const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
-    const hooks = await foundry.deploy({
-      file: 'ScrollVerifierHooks',
-      args: [rollup.poseidon],
-    });
-    const verifier = await foundry.deploy({
-      file: 'ScrollVerifier',
-      args: [
-        [opts.endpoint ?? ccip.endpoint],
-        rollup.defaultWindow,
-        hooks,
-        rollup.ScrollChain,
-      ],
-      libs: { GatewayVM },
-    });
-    if (opts.skipZero === undefined) {
-      // 20241004: we know this test fails, auto-skip during ci
-      opts.skipZero = !!process.env.IS_CI;
+  return createTestSuite(
+    testName(config, { endpoint: opts.endpoint }),
+    opts,
+    async () => {
+      const rollup = new ScrollRollup(createProviderPair(config), config);
+      const foundry = await Foundry.launch({
+        fork: providerURL(config.chain1),
+        infoLog: !!opts.log,
+      });
+      afterAll(foundry.shutdown);
+      const gateway = new Gateway(rollup);
+      const ccip = await serve(gateway, { protocol: 'raw', log: !!opts.log });
+      afterAll(ccip.shutdown);
+      const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
+      const hooks = await foundry.deploy({
+        file: 'ScrollVerifierHooks',
+        args: [rollup.poseidon],
+      });
+      const verifier = await foundry.deploy({
+        file: 'ScrollVerifier',
+        args: [
+          [opts.endpoint ?? ccip.endpoint],
+          rollup.defaultWindow,
+          hooks,
+          rollup.ScrollChain,
+        ],
+        libs: { GatewayVM },
+      });
+      if (opts.skipZero === undefined) {
+        // 20241004: we know this test fails, auto-skip during ci
+        opts.skipZero = !!process.env.IS_CI;
+      }
+      return setupTests(verifier, opts);
     }
-    await setupTests(verifier, opts);
-  });
+  );
 }
 
 export function testSelfEth(chain: Chain, opts: TestOptions) {
-  describe.skipIf(shouldSkip(opts))(chainName(chain), async () => {
+  createTestSuite(chainName(chain), opts, async () => {
     const foundry = await Foundry.launch({
       fork: providerURL(chain),
       infoLog: !!opts.log,
@@ -230,7 +268,7 @@ export function testSelfEth(chain: Chain, opts: TestOptions) {
       args: [[ccip.endpoint], rollup.defaultWindow, hooks],
       libs: { GatewayVM },
     });
-    await setupTests(verifier, opts);
+    return setupTests(verifier, opts);
   });
 }
 
@@ -279,42 +317,46 @@ export function testLinea(
   config: RollupDeployment<LineaConfig>,
   opts: TestOptions & { endpoint?: string }
 ) {
-  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
-    const rollup = new LineaRollup(createProviderPair(config), config);
-    const foundry = await Foundry.launch({
-      fork: providerURL(config.chain1),
-      infoLog: !!opts.log,
-    });
-    afterAll(foundry.shutdown);
-    const gateway = new Gateway(rollup);
-    const ccip = await serve(gateway, { protocol: 'raw', log: !!opts.log });
-    afterAll(ccip.shutdown);
-    const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
-    const hooks = await foundry.deploy({
-      file: 'LineaVerifierHooks',
-      libs: {
-        SparseMerkleProof: config.SparseMerkleProof,
-      },
-    });
-    const verifier = await foundry.deploy({
-      file: 'LineaVerifier',
-      args: [
-        [opts.endpoint ?? ccip.endpoint],
-        rollup.defaultWindow,
-        hooks,
-        config.L1MessageService,
-      ],
-      libs: { GatewayVM },
-    });
-    await setupTests(verifier, opts);
-  });
+  return createTestSuite(
+    testName(config, { endpoint: opts.endpoint }),
+    opts,
+    async () => {
+      const rollup = new LineaRollup(createProviderPair(config), config);
+      const foundry = await Foundry.launch({
+        fork: providerURL(config.chain1),
+        infoLog: !!opts.log,
+      });
+      afterAll(foundry.shutdown);
+      const gateway = new Gateway(rollup);
+      const ccip = await serve(gateway, { protocol: 'raw', log: !!opts.log });
+      afterAll(ccip.shutdown);
+      const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
+      const hooks = await foundry.deploy({
+        file: 'LineaVerifierHooks',
+        libs: {
+          SparseMerkleProof: config.SparseMerkleProof,
+        },
+      });
+      const verifier = await foundry.deploy({
+        file: 'LineaVerifier',
+        args: [
+          [opts.endpoint ?? ccip.endpoint],
+          rollup.defaultWindow,
+          hooks,
+          config.L1MessageService,
+        ],
+        libs: { GatewayVM },
+      });
+      return setupTests(verifier, opts);
+    }
+  );
 }
 
 export function testZKSync(
   config: RollupDeployment<ZKSyncConfig>,
   opts: TestOptions
 ) {
-  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
+  createTestSuite(testName(config), opts, async () => {
     const rollup = new ZKSyncRollup(createProviderPair(config), config);
     const foundry = await Foundry.launch({
       fork: providerURL(config.chain1),
@@ -336,7 +378,7 @@ export function testZKSync(
       args: [[ccip.endpoint], rollup.defaultWindow, hooks, rollup.DiamondProxy],
       libs: { GatewayVM },
     });
-    await setupTests(verifier, opts);
+    return setupTests(verifier, opts);
   });
 }
 
@@ -419,29 +461,33 @@ export function testNitro(
   config: RollupDeployment<NitroConfig>,
   opts: TestOptions & { endpoint?: string }
 ) {
-  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
-    const rollup = new NitroRollup(createProviderPair(config), config);
-    const foundry = await Foundry.launch({
-      fork: providerURL(config.chain1),
-      infoLog: !!opts.log,
-    });
-    afterAll(foundry.shutdown);
-    const gateway = new Gateway(rollup);
-    const ccip = await serve(gateway, { protocol: 'raw', log: false });
-    afterAll(ccip.shutdown);
-    const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
-    const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
-    const verifier = await foundry.deploy({
-      file: 'NitroVerifier',
-      args: [
-        [opts.endpoint ?? ccip.endpoint],
-        rollup.defaultWindow,
-        hooks,
-        rollup.Rollup,
-        rollup.minAgeBlocks,
-      ],
-      libs: { GatewayVM },
-    });
-    await setupTests(verifier, opts);
-  });
+  return createTestSuite(
+    testName(config, { endpoint: opts.endpoint }),
+    opts,
+    async () => {
+      const rollup = new NitroRollup(createProviderPair(config), config);
+      const foundry = await Foundry.launch({
+        fork: providerURL(config.chain1),
+        infoLog: !!opts.log,
+      });
+      afterAll(foundry.shutdown);
+      const gateway = new Gateway(rollup);
+      const ccip = await serve(gateway, { protocol: 'raw', log: false });
+      afterAll(ccip.shutdown);
+      const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
+      const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
+      const verifier = await foundry.deploy({
+        file: 'NitroVerifier',
+        args: [
+          [opts.endpoint ?? ccip.endpoint],
+          rollup.defaultWindow,
+          hooks,
+          rollup.Rollup,
+          rollup.minAgeBlocks,
+        ],
+        libs: { GatewayVM },
+      });
+      return setupTests(verifier, opts);
+    }
+  );
 }

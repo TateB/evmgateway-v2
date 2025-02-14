@@ -23,6 +23,7 @@
     "forge": "forge build --force",
     "serve": "bun scripts/serve.ts",
     "test": "IS_CI=1 bun test --timeout 25000",
+    "test-external": "bun test test/gateway/external/* --timeout 25000",
     "test-all": "bun test --timeout 25000",
     "test-contracts": "forge test -C test/",
     "test-components": "bun scripts/opcodes.ts quiet && bun run test-contracts && bun test test/components/*",
