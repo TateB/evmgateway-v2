@@ -129,7 +129,7 @@ export function testOP(
 
 export function testOPFault(
   config: RollupDeployment<OPFaultConfig>,
-  opts: TestOptions & { minAgeSec?: number }
+  opts: TestOptions & { minAgeSec?: number; endpoint?: string }
 ) {
   describe.skipIf(shouldSkip(opts))(
     testName(config, { unfinalized: !!opts.minAgeSec }),
@@ -158,7 +158,7 @@ export function testOPFault(
       const verifier = await foundry.deploy({
         file: 'OPFaultVerifier',
         args: [
-          [ccip.endpoint],
+          [opts.endpoint ?? ccip.endpoint],
           rollup.defaultWindow,
           hooks,
           [
@@ -177,7 +177,7 @@ export function testOPFault(
 
 export function testScroll(
   config: RollupDeployment<ScrollConfig>,
-  opts: TestOptions
+  opts: TestOptions & { endpoint?: string }
 ) {
   describe.skipIf(shouldSkip(opts))(testName(config), async () => {
     const rollup = new ScrollRollup(createProviderPair(config), config);
@@ -196,7 +196,12 @@ export function testScroll(
     });
     const verifier = await foundry.deploy({
       file: 'ScrollVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, hooks, rollup.ScrollChain],
+      args: [
+        [opts.endpoint ?? ccip.endpoint],
+        rollup.defaultWindow,
+        hooks,
+        rollup.ScrollChain,
+      ],
       libs: { GatewayVM },
     });
     if (opts.skipZero === undefined) {
@@ -272,7 +277,7 @@ export function testTrustedEth(chain2: Chain, opts: TestOptions) {
 
 export function testLinea(
   config: RollupDeployment<LineaConfig>,
-  opts: TestOptions
+  opts: TestOptions & { endpoint?: string }
 ) {
   describe.skipIf(shouldSkip(opts))(testName(config), async () => {
     const rollup = new LineaRollup(createProviderPair(config), config);
@@ -294,7 +299,7 @@ export function testLinea(
     const verifier = await foundry.deploy({
       file: 'LineaVerifier',
       args: [
-        [ccip.endpoint],
+        [opts.endpoint ?? ccip.endpoint],
         rollup.defaultWindow,
         hooks,
         config.L1MessageService,
@@ -408,4 +413,35 @@ export function testDoubleNitro(
       await setupTests(verifier, opts);
     }
   );
+}
+
+export function testNitro(
+  config: RollupDeployment<NitroConfig>,
+  opts: TestOptions & { endpoint?: string }
+) {
+  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
+    const rollup = new NitroRollup(createProviderPair(config), config);
+    const foundry = await Foundry.launch({
+      fork: providerURL(config.chain1),
+      infoLog: !!opts.log,
+    });
+    afterAll(foundry.shutdown);
+    const gateway = new Gateway(rollup);
+    const ccip = await serve(gateway, { protocol: 'raw', log: false });
+    afterAll(ccip.shutdown);
+    const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
+    const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
+    const verifier = await foundry.deploy({
+      file: 'NitroVerifier',
+      args: [
+        [opts.endpoint ?? ccip.endpoint],
+        rollup.defaultWindow,
+        hooks,
+        rollup.Rollup,
+        rollup.minAgeBlocks,
+      ],
+      libs: { GatewayVM },
+    });
+    await setupTests(verifier, opts);
+  });
 }
