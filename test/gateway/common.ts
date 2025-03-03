@@ -8,7 +8,7 @@ import {
 } from '../providers.js';
 import { chainName, CHAINS } from '../../src/chains.js';
 import { serve } from '@resolverworks/ezccip/serve';
-import { type DeployedContract, Foundry } from '@adraffy/blocksmith';
+import { type FoundryContract, Foundry } from '@adraffy/blocksmith';
 import { runSlotDataTests } from './tests.js';
 import { type OPConfig, OPRollup } from '../../src/op/OPRollup.js';
 import {
@@ -31,6 +31,7 @@ import { EthSelfRollup } from '../../src/eth/EthSelfRollup.js';
 import { TrustedRollup } from '../../src/TrustedRollup.js';
 import { EthProver } from '../../src/eth/EthProver.js';
 import { randomBytes, SigningKey } from 'ethers/crypto';
+import { ZeroAddress } from 'ethers/constants';
 import { afterAll } from 'bun:test';
 import { describe } from '../bun-describe-fix.js';
 
@@ -51,11 +52,11 @@ type TestOptions = {
   slotDataPointer?: HexAddress;
   log?: boolean;
   skipCI?: boolean;
-  skipZero?: boolean;
+  window?: number;
 };
 
 export async function quickTest(
-  verifier: DeployedContract,
+  verifier: FoundryContract,
   target: HexAddress,
   slot: bigint
 ) {
@@ -67,21 +68,17 @@ export async function quickTest(
   return reader.readSlot(slot, { enableCcipRead: true });
 }
 
-export async function setupTests(
-  verifier: DeployedContract,
-  opts: TestOptions,
-  configure?: (fetcher: DeployedContract) => Promise<void>
-) {
+export async function setupTests(verifier: FoundryContract, opts: TestOptions) {
   const foundry = Foundry.of(verifier);
   const reader = await foundry.deploy({
     file: 'SlotDataReader',
-    args: [verifier, opts.slotDataContract],
+    args: [
+      verifier,
+      opts.slotDataContract,
+      opts.slotDataPointer ?? ZeroAddress,
+    ],
   });
-  if (opts.slotDataPointer) {
-    await foundry.confirm(reader.setPointer(opts.slotDataPointer));
-  }
-  await configure?.(reader);
-  runSlotDataTests(reader, !!opts.slotDataPointer, !!opts.skipZero);
+  runSlotDataTests(reader, !!opts.slotDataPointer);
 }
 
 function shouldSkip(opts: TestOptions) {
@@ -159,7 +156,7 @@ export function testOPFault(
         file: 'OPFaultVerifier',
         args: [
           [ccip.endpoint],
-          rollup.defaultWindow,
+          opts.window ?? rollup.defaultWindow,
           hooks,
           [
             rollup.OptimismPortal,
@@ -173,6 +170,37 @@ export function testOPFault(
       await setupTests(verifier, opts);
     }
   );
+}
+
+export function testNitro(
+  config: RollupDeployment<NitroConfig>,
+  opts: TestOptions & { minAgeBlocks?: number }
+) {
+  describe.skipIf(shouldSkip(opts))(testName(config), async () => {
+    const rollup = new NitroRollup(createProviderPair(config), config);
+    const foundry = await Foundry.launch({
+      fork: providerURL(config.chain1),
+      infoLog: !!opts.log,
+    });
+    afterAll(foundry.shutdown);
+    const gateway = new Gateway(rollup);
+    const ccip = await serve(gateway, { protocol: 'raw', log: !!opts.log });
+    afterAll(ccip.shutdown);
+    const GatewayVM = await foundry.deploy({ file: 'GatewayVM' });
+    const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
+    const verifier = await foundry.deploy({
+      file: 'NitroVerifier',
+      args: [
+        [ccip.endpoint],
+        opts.window ?? rollup.defaultWindow,
+        hooks,
+        rollup.Rollup,
+        opts.minAgeBlocks ?? rollup.minAgeBlocks,
+      ],
+      libs: { GatewayVM },
+    });
+    await setupTests(verifier, opts);
+  });
 }
 
 export function testScroll(
@@ -196,13 +224,14 @@ export function testScroll(
     });
     const verifier = await foundry.deploy({
       file: 'ScrollVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, hooks, rollup.ScrollChain],
+      args: [
+        [ccip.endpoint],
+        opts.window ?? rollup.defaultWindow,
+        hooks,
+        rollup.ScrollChain,
+      ],
       libs: { GatewayVM },
     });
-    if (opts.skipZero === undefined) {
-      // 20241004: we know this test fails, auto-skip during ci
-      opts.skipZero = !!process.env.IS_CI;
-    }
     await setupTests(verifier, opts);
   });
 }
@@ -222,7 +251,7 @@ export function testSelfEth(chain: Chain, opts: TestOptions) {
     const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
     const verifier = await foundry.deploy({
       file: 'SelfVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, hooks],
+      args: [[ccip.endpoint], opts.window ?? rollup.defaultWindow, hooks],
       libs: { GatewayVM },
     });
     await setupTests(verifier, opts);
@@ -251,21 +280,10 @@ export function testTrustedEth(chain2: Chain, opts: TestOptions) {
       const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
       const verifier = await foundry.deploy({
         file: 'TrustedVerifier',
+        args: [hooks, [ccip.endpoint], [rollup.signerAddress], 60],
         libs: { GatewayVM },
       });
-      await setupTests(verifier, opts, async (fetcher) => {
-        await foundry.confirm(
-          verifier.setConfig(
-            fetcher,
-            [ccip.endpoint],
-            rollup.defaultWindow,
-            hooks
-          )
-        );
-        await foundry.confirm(
-          verifier.setSigner(fetcher, rollup.signerAddress, true)
-        );
-      });
+      await setupTests(verifier, opts);
     }
   );
 }
@@ -295,7 +313,7 @@ export function testLinea(
       file: 'LineaVerifier',
       args: [
         [ccip.endpoint],
-        rollup.defaultWindow,
+        opts.window ?? rollup.defaultWindow,
         hooks,
         config.L1MessageService,
       ],
@@ -328,7 +346,12 @@ export function testZKSync(
     });
     const verifier = await foundry.deploy({
       file: 'ZKSyncVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, hooks, rollup.DiamondProxy],
+      args: [
+        [ccip.endpoint],
+        opts.window ?? rollup.defaultWindow,
+        hooks,
+        rollup.DiamondProxy,
+      ],
       libs: { GatewayVM },
     });
     await setupTests(verifier, opts);
@@ -353,7 +376,12 @@ export function testTaiko(
     const hooks = await foundry.deploy({ file: 'EthVerifierHooks' });
     const verifier = await foundry.deploy({
       file: 'TaikoVerifier',
-      args: [[ccip.endpoint], rollup.defaultWindow, hooks, rollup.TaikoL1],
+      args: [
+        [ccip.endpoint],
+        opts.window ?? rollup.defaultWindow,
+        hooks,
+        rollup.TaikoL1,
+      ],
       libs: { GatewayVM },
     });
     await setupTests(verifier, opts);
@@ -395,7 +423,7 @@ export function testDoubleNitro(
         file: 'DoubleNitroVerifier',
         args: [
           [ccip.endpoint],
-          rollup.defaultWindow,
+          opts.window ?? rollup.defaultWindow,
           hooks,
           rollup.rollup12.Rollup,
           rollup.rollup12.minAgeBlocks,
